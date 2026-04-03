@@ -471,6 +471,21 @@ if st.session_state["images_meta"]:
                 sizing_option="Enlarge to Largest"
             )
 
+        if st.session_state["flexible_collage"] is not None:
+            st.divider()
+            st.subheader("↕ Flexible Collage Preview")
+            st.image(st.session_state["flexible_collage"], use_container_width=True)
+
+            buf_flex = io.BytesIO()
+            st.session_state["flexible_collage"].save(buf_flex, format="PNG")
+            st.download_button(
+                "📥 Download Flexible Collage",
+                buf_flex.getvalue(),
+                file_name="flexible_collage.png",
+                use_container_width=True,
+                key="download_flexible_collage"
+            )
+
     with t3:
         st.subheader("📏 Image Sizing")
 
@@ -521,30 +536,20 @@ if st.session_state["images_meta"]:
                 sizing_option
             )
 
-    if st.session_state["flexible_collage"]:
-        st.subheader("↕ Flexible Collage")
-        st.image(st.session_state["flexible_collage"], use_container_width=True)
+        if st.session_state["generated_collage"] is not None:
+            st.divider()
+            st.subheader("🖼️ Generated Collage")
+            st.image(st.session_state["generated_collage"], use_container_width=True)
 
-        buf_flex = io.BytesIO()
-        st.session_state["flexible_collage"].save(buf_flex, format="PNG")
-        st.download_button(
-            "📥 Download Flexible Collage",
-            buf_flex.getvalue(),
-            file_name="flexible_collage.png",
-            use_container_width=True
-        )
-
-    if st.session_state["generated_collage"]:
-        st.subheader("🖼️ Generated Collage")
-        st.image(st.session_state["generated_collage"], use_container_width=True)
-
-        buf = io.BytesIO()
-        st.session_state["generated_collage"].save(buf, format="PNG")
-        st.download_button(
-            "📥 Download Collage",
-            buf.getvalue(),
-            file_name="collage.png"
-        )
+            buf = io.BytesIO()
+            st.session_state["generated_collage"].save(buf, format="PNG")
+            st.download_button(
+                "📥 Download Collage",
+                buf.getvalue(),
+                file_name="collage.png",
+                use_container_width=True,
+                key="download_standard_collage"
+            )
 
 else:
     st.info("Please upload images in the sidebar to start.")
