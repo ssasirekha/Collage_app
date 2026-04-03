@@ -36,6 +36,15 @@ st.markdown("""
         text-align: center;
         margin-bottom: 10px;
     }
+    .meta-chip {
+        display: inline-block;
+        padding: 2px 8px;
+        margin-top: 6px;
+        border-radius: 999px;
+        background: #e2e8f0;
+        color: #334155;
+        font-size: 0.75rem;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -45,6 +54,8 @@ class ImageItem:
     id: str
     original_file_name: str
     display_name: str = "Processing..."
+    category: str = "General"
+    confidence: str = "low"
 
 
 if "images_meta" not in st.session_state:
@@ -72,30 +83,72 @@ def get_openai_client():
 def classify_image(raw_bytes: bytes):
     client = get_openai_client()
     if not client:
-        return {"name": "Unknown Asset"}
+        return {
+            "name": "Unknown Asset",
+            "category": "General",
+            "confidence": "low"
+        }
 
     base_img = base64.b64encode(raw_bytes).decode("utf-8")
 
     prompt = """
-You are an image labelling assistant.
+You are an expert visual asset labelling assistant.
 
-Task:
-Look at the uploaded image and identify the main object clearly.
+Your job is to examine the uploaded image and identify the PRIMARY visible subject.
 
-Rules:
-- Return a short display label of 1 to 3 words only.
-- Use title case.
-- Do not include extra explanation.
-- Do not return the uploaded file name.
-- Focus on the actual visual object in the image.
-- If unclear, return "Unknown Asset".
-- Output only valid JSON in this format:
-{"name":"Label Here"}
+Return a precise short label for the main subject in the image.
+
+Instructions:
+1. Focus only on what is clearly visible in the image.
+2. Do NOT use the file name.
+3. Do NOT use vague labels like:
+   "Asset", "Object", "Equipment", "Machine", "Item", "Image"
+   unless the object is truly unclear.
+4. Prefer specific names:
+   - "Office Chair" instead of "Chair"
+   - "Desktop Monitor" instead of "Screen"
+   - "Water Pump" instead of "Machine"
+   - "Lab Microscope" instead of "Instrument"
+   - "Conference Room" instead of "Room"
+5. If there are multiple objects, choose the most dominant or central one.
+6. If the image shows a place instead of an object, name the place:
+   - "Server Room", "Classroom", "Office Lobby"
+7. If the image shows a document, screenshot, poster, certificate, interface, or slide,
+   label it accordingly:
+   - "Invoice Document", "Login Screen", "Certificate", "Presentation Slide"
+8. Keep the label short: 1 to 3 words.
+9. Use Title Case.
+10. If not clear, return "Unknown Asset".
+
+You must return valid JSON in exactly this format:
+{
+  "name": "Short Specific Name",
+  "category": "One broad category",
+  "confidence": "high"
+}
+
+Allowed confidence values:
+- high
+- medium
+- low
+
+Category examples:
+- Furniture
+- Electronics
+- Industrial
+- Vehicle
+- Building
+- Room
+- Document
+- Person
+- Nature
+- General
 """
 
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
+            temperature=0.2,
             messages=[
                 {
                     "role": "user",
@@ -104,7 +157,8 @@ Rules:
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:image/png;base64,{base_img}"
+                                "url": f"data:image/png;base64,{base_img}",
+                                "detail": "high"
                             }
                         }
                     ]
@@ -116,14 +170,44 @@ Rules:
         content = response.choices[0].message.content
         parsed = json.loads(content)
 
-        label = parsed.get("name", "Unknown Asset").strip()
+        label = str(parsed.get("name", "Unknown Asset")).strip()
+        category = str(parsed.get("category", "General")).strip()
+        confidence = str(parsed.get("confidence", "low")).strip().lower()
+
         if not label:
             label = "Unknown Asset"
 
-        return {"name": label}
+        bad_labels = {"asset", "object", "equipment", "machine", "item", "image", "photo"}
+        if label.lower() in bad_labels:
+            label = "Unknown Asset"
+
+        if not category:
+            category = "General"
+
+        if confidence not in {"high", "medium", "low"}:
+            confidence = "low"
+
+        generic_words = {
+            "unknown asset", "asset", "object", "equipment", "machine", "item", "image", "photo"
+        }
+        if label.lower() in generic_words:
+            if category and category.lower() != "general":
+                label = f"Unknown {category}".strip()
+            else:
+                label = "Unknown Asset"
+
+        return {
+            "name": label,
+            "category": category,
+            "confidence": confidence
+        }
 
     except Exception:
-        return {"name": "Unknown Asset"}
+        return {
+            "name": "Unknown Asset",
+            "category": "General",
+            "confidence": "low"
+        }
 
 
 # --- 3. Helpers ---
@@ -185,6 +269,23 @@ def wrap_text(draw, text, font, max_width):
 
     lines.append(current)
     return lines
+
+
+def apply_classification_to_item(item_id: str, result: dict):
+    label = result.get("name", "Unknown Asset").strip() or "Unknown Asset"
+    category = result.get("category", "General").strip() or "General"
+    confidence = result.get("confidence", "low").strip().lower() or "low"
+
+    st.session_state[f"dn_{item_id}"] = label
+    st.session_state[f"cat_{item_id}"] = category
+    st.session_state[f"conf_{item_id}"] = confidence
+
+    for m in st.session_state["images_meta"]:
+        if m["id"] == item_id:
+            m["display_name"] = label
+            m["category"] = category
+            m["confidence"] = confidence
+            break
 
 
 # --- 4. Rendering Engine ---
@@ -327,7 +428,9 @@ with st.sidebar:
                     ImageItem(
                         id=uid,
                         original_file_name=f.name,
-                        display_name="Processing..."
+                        display_name="Processing...",
+                        category="General",
+                        confidence="low"
                     )
                 )
             )
@@ -344,20 +447,15 @@ with st.sidebar:
 
             keys_to_delete = [
                 k for k in list(st.session_state.keys())
-                if k.startswith("dn_") or k.startswith("inp_")
+                if k.startswith("dn_") or k.startswith("inp_") or k.startswith("cat_") or k.startswith("conf_")
             ]
             for k in keys_to_delete:
                 del st.session_state[k]
 
-            for m in st.session_state["images_meta"]:
-                res = classify_image(st.session_state["images_bytes"][m["id"]])
-                label = res.get("name", "Unknown Asset").strip()
-
-                if not label:
-                    label = "Unknown Asset"
-
-                st.session_state[f"dn_{m['id']}"] = label
-                m["display_name"] = label
+            with st.spinner("AI is labelling images..."):
+                for m in st.session_state["images_meta"]:
+                    res = classify_image(st.session_state["images_bytes"][m["id"]])
+                    apply_classification_to_item(m["id"], res)
 
             st.rerun()
 
@@ -372,18 +470,11 @@ if st.session_state["images_meta"]:
             with st.spinner("Analyzing..."):
                 for m in st.session_state["images_meta"]:
                     res = classify_image(st.session_state["images_bytes"][m["id"]])
-                    label = res.get("name", "Unknown Asset").strip()
-
-                    if not label:
-                        label = "Unknown Asset"
-
-                    st.session_state[f"dn_{m['id']}"] = label
-                    m["display_name"] = label
-
+                    apply_classification_to_item(m["id"], res)
             st.rerun()
 
         for m in get_ordered_items():
-            col_a, col_b = st.columns([1, 5])
+            col_a, col_b, col_c = st.columns([1, 5, 2])
             col_a.image(st.session_state["images_bytes"][m["id"]], width=100)
 
             current_label = st.session_state.get(f"dn_{m['id']}", "")
@@ -391,6 +482,14 @@ if st.session_state["images_meta"]:
                 "Label",
                 value=current_label if current_label else m["display_name"],
                 key=f"inp_{m['id']}"
+            )
+
+            category = st.session_state.get(f"cat_{m['id']}", m.get("category", "General"))
+            confidence = st.session_state.get(f"conf_{m['id']}", m.get("confidence", "low"))
+
+            col_c.markdown(
+                f"<div class='meta-chip'>{category} · {confidence}</div>",
+                unsafe_allow_html=True
             )
 
             st.session_state[f"dn_{m['id']}"] = new_label
@@ -434,7 +533,8 @@ if st.session_state["images_meta"]:
                 st.markdown(
                     f"""
                     <div class="mini-card">
-                        <strong>{item.get("display_name", "Unknown Asset")}</strong>
+                        <strong>{item.get("display_name", "Unknown Asset")}</strong><br>
+                        <span style="font-size:0.8rem;color:#64748b;">{item.get("category", "General")} · {item.get("confidence", "low")}</span>
                     </div>
                     """,
                     unsafe_allow_html=True
