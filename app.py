@@ -10,17 +10,30 @@ from dataclasses import dataclass, asdict
 import streamlit as st
 from PIL import Image, ImageOps, ImageDraw, ImageFont, ImageColor
 from openai import OpenAI
+from streamlit_sortables import sort_items
 
 # --- 1. Setup & State ---
 st.set_page_config(page_title="AI Asset Studio Pro", page_icon="🖼️", layout="wide")
 
 st.markdown("""
     <style>
-    .main-header { font-size: 2.2rem; font-weight: 800; color: #1e293b; margin-bottom: 1rem; }
+    .main-header {
+        font-size: 2.2rem;
+        font-weight: 800;
+        color: #1e293b;
+        margin-bottom: 1rem;
+    }
     div.stButton > button:first-child[kind="primary"] {
         background-color: #ff4b4b;
         border-color: #ff4b4b;
         color: white;
+    }
+    .mini-card {
+        padding: 8px;
+        border-radius: 12px;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        text-align: center;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -42,8 +55,8 @@ if "images_bytes" not in st.session_state:
 if "generated_collage" not in st.session_state:
     st.session_state["generated_collage"] = None
 
-if "alternate_collage" not in st.session_state:
-    st.session_state["alternate_collage"] = None
+if "image_order" not in st.session_state:
+    st.session_state["image_order"] = []
 
 
 # --- 2. AI Logic ---
@@ -109,7 +122,7 @@ Rules:
         return {"name": "Unknown Asset"}
 
 
-# --- 3. Font helper ---
+# --- 3. Helpers ---
 def get_font(font_size=40):
     font_path = "Roboto-Bold.ttf"
     if not os.path.exists(font_path):
@@ -129,7 +142,49 @@ def get_font(font_size=40):
         return ImageFont.load_default()
 
 
-# --- 4. Rendering Engine - Standard ---
+def get_ordered_items():
+    items_map = {m["id"]: m for m in st.session_state["images_meta"]}
+
+    if not st.session_state["image_order"]:
+        st.session_state["image_order"] = [m["id"] for m in st.session_state["images_meta"]]
+
+    ordered = []
+    for item_id in st.session_state["image_order"]:
+        if item_id in items_map:
+            ordered.append(items_map[item_id])
+
+    # add any missing ids
+    known = set(st.session_state["image_order"])
+    for m in st.session_state["images_meta"]:
+        if m["id"] not in known:
+            ordered.append(m)
+            st.session_state["image_order"].append(m["id"])
+
+    return ordered
+
+
+def wrap_text(draw, text, font, max_width):
+    words = text.split()
+    if not words:
+        return [""]
+
+    lines = []
+    current = words[0]
+
+    for word in words[1:]:
+        test = current + " " + word
+        bbox = draw.textbbox((0, 0), test, font=font)
+        if bbox[2] - bbox[0] <= max_width:
+            current = test
+        else:
+            lines.append(current)
+            current = word
+
+    lines.append(current)
+    return lines
+
+
+# --- 4. Rendering Engine ---
 def render_collage(items, mode, cols, gap, margin, radius, b_weight, b_color, bg_color, font_size, sizing_option):
     if not items:
         return None
@@ -200,148 +255,52 @@ def render_collage(items, mode, cols, gap, margin, radius, b_weight, b_color, bg
             )
 
         name_txt = item.get("display_name", "UNKNOWN ASSET").upper()
+        lines = wrap_text(draw, name_txt, font, tile_w - 80)
 
-        bbox = draw.textbbox((0, 0), name_txt, font=font)
-        text_w = bbox[2] - bbox[0]
-        text_h = bbox[3] - bbox[1]
+        line_heights = []
+        line_widths = []
+        for line in lines:
+            bbox = draw.textbbox((0, 0), line, font=font)
+            line_widths.append(bbox[2] - bbox[0])
+            line_heights.append(bbox[3] - bbox[1])
+
+        text_w = max(line_widths) if line_widths else 0
+        text_h = sum(line_heights) + (max(0, len(lines) - 1) * 8)
 
         pad_x = 30
-        pad_y = 15
+        pad_y = 18
         box_w = text_w + (2 * pad_x)
         box_h = text_h + (2 * pad_y)
 
         px = (tile_w - box_w) // 2
-        py = tile_h - box_h - 40
+        py = tile_h - box_h - 30
 
         draw.rounded_rectangle(
             [px, py, px + box_w, py + box_h],
-            radius=12,
+            radius=16,
             fill=(15, 23, 42, 220),
             outline="white",
             width=2
         )
-        draw.text(
-            (tile_w // 2, py + box_h // 2),
-            name_txt,
-            fill="white",
-            font=font,
-            anchor="mm"
-        )
+
+        current_y = py + pad_y
+        for i, line in enumerate(lines):
+            lh = line_heights[i]
+            draw.text(
+                (tile_w // 2, current_y + lh // 2),
+                line,
+                fill="white",
+                font=font,
+                anchor="mm"
+            )
+            current_y += lh + 8
 
         canvas.alpha_composite(tile_cv, (int(x), int(y)))
 
     return canvas.convert("RGB")
 
 
-# --- 5. Rendering Engine - Alternate ---
-def render_alternate_collage(items, bg_color="#F8FAFC", font_size=34):
-    if not items:
-        return None
-
-    valid_items = []
-    pil_images = []
-
-    for m in items:
-        img_bytes = st.session_state["images_bytes"].get(m["id"])
-        if img_bytes:
-            pil_images.append(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
-            valid_items.append(m)
-
-    if not pil_images:
-        return None
-
-    count = len(valid_items)
-    canvas_w = 2200
-    outer_margin = 70
-    gap = 35
-    label_area = 85
-    cols = 2 if count <= 4 else 3
-
-    tile_w = (canvas_w - (2 * outer_margin) - ((cols - 1) * gap)) // cols
-    img_h = int(tile_w * 0.72)
-    card_h = img_h + label_area
-
-    rows = math.ceil(count / cols)
-    canvas_h = outer_margin + rows * (card_h + gap) + outer_margin + 40
-
-    canvas = Image.new("RGBA", (canvas_w, canvas_h), ImageColor.getrgb(bg_color) + (255,))
-    draw_canvas = ImageDraw.Draw(canvas)
-    font = get_font(font_size)
-
-    shadow_offset = 10
-
-    for idx, (item, raw_img) in enumerate(zip(valid_items, pil_images)):
-        r, c = divmod(idx, cols)
-
-        x = outer_margin + c * (tile_w + gap)
-        y = outer_margin + r * (card_h + gap)
-
-        # stagger alternate rows slightly
-        if r % 2 == 1:
-            x += 40
-
-        card = Image.new("RGBA", (tile_w, card_h), (255, 255, 255, 0))
-        card_draw = ImageDraw.Draw(card)
-
-        # shadow
-        draw_canvas.rounded_rectangle(
-            [x + shadow_offset, y + shadow_offset, x + tile_w + shadow_offset, y + card_h + shadow_offset],
-            radius=28,
-            fill=(0, 0, 0, 25)
-        )
-
-        # card background
-        card_draw.rounded_rectangle(
-            [0, 0, tile_w, card_h],
-            radius=28,
-            fill=(255, 255, 255, 255),
-            outline=(226, 232, 240, 255),
-            width=2
-        )
-
-        # image
-        fitted = ImageOps.fit(raw_img, (tile_w - 24, img_h - 20), Image.LANCZOS)
-        img_mask = Image.new("L", (tile_w - 24, img_h - 20), 0)
-        ImageDraw.Draw(img_mask).rounded_rectangle(
-            (0, 0, tile_w - 24, img_h - 20),
-            radius=20,
-            fill=255
-        )
-        card.paste(fitted, (12, 12), img_mask)
-
-        # label
-        name_txt = item.get("display_name", "Unknown Asset").upper()
-        bbox = card_draw.textbbox((0, 0), name_txt, font=font)
-        text_w = bbox[2] - bbox[0]
-        text_h = bbox[3] - bbox[1]
-
-        text_x = tile_w // 2
-        text_y = img_h + ((label_area - 10) // 2)
-
-        pill_w = min(tile_w - 40, text_w + 42)
-        pill_h = text_h + 22
-        pill_x1 = (tile_w - pill_w) // 2
-        pill_y1 = img_h + 14
-
-        card_draw.rounded_rectangle(
-            [pill_x1, pill_y1, pill_x1 + pill_w, pill_y1 + pill_h],
-            radius=18,
-            fill=(15, 23, 42, 235)
-        )
-        card_draw.text(
-            (text_x, text_y + 4),
-            name_txt,
-            fill="white",
-            font=font,
-            anchor="mm"
-        )
-
-        canvas.alpha_composite(card, (x, y))
-
-    return canvas.convert("RGB")
-
-
-# --- 6. Sidebar & Upload Handling ---
+# --- 5. Sidebar & Upload Handling ---
 with st.sidebar:
     st.header("📤 Media Input")
     uploaded_files = st.file_uploader(
@@ -377,7 +336,7 @@ with st.sidebar:
             st.session_state["images_bytes"] = new_bytes
             st.session_state["images_meta"] = new_meta
             st.session_state["generated_collage"] = None
-            st.session_state["alternate_collage"] = None
+            st.session_state["image_order"] = [m["id"] for m in new_meta]
 
             keys_to_delete = [
                 k for k in list(st.session_state.keys())
@@ -399,10 +358,10 @@ with st.sidebar:
             st.rerun()
 
 
-# --- 7. Main UI ---
+# --- 6. Main UI ---
 if st.session_state["images_meta"]:
     st.markdown('<p class="main-header">🖼️ AI Image Studio</p>', unsafe_allow_html=True)
-    t1, t2 = st.tabs(["📝 AI & Labels", "🎨 Style & Layout"])
+    t1, t2, t3 = st.tabs(["📝 AI & Labels", "↕ Flexible Grid", "🎨 Style & Layout"])
 
     with t1:
         if st.button("✨ RUN AI AUTO-LABEL", use_container_width=True, type="primary"):
@@ -419,7 +378,7 @@ if st.session_state["images_meta"]:
 
             st.rerun()
 
-        for m in st.session_state["images_meta"]:
+        for m in get_ordered_items():
             col_a, col_b = st.columns([1, 5])
             col_a.image(st.session_state["images_bytes"][m["id"]], width=100)
 
@@ -434,6 +393,44 @@ if st.session_state["images_meta"]:
             m["display_name"] = new_label.strip() if new_label.strip() else "Unknown Asset"
 
     with t2:
+        st.subheader("↕ Flexible Grid Arrangement")
+        st.caption("Drag the image cards to reorder them. The collage will be created in this exact order.")
+
+        sortable_items = []
+        for m in get_ordered_items():
+            label = m.get("display_name", "Unknown Asset")
+            sortable_items.append({
+                "id": m["id"],
+                "name": label
+            })
+
+        new_order = sort_items(
+            sortable_items,
+            direction="horizontal",
+            multi_containers=False
+        )
+
+        if new_order:
+            st.session_state["image_order"] = [item["id"] for item in new_order]
+
+        ordered_items = get_ordered_items()
+
+        preview_cols = st.slider("Flexible Grid Preview Columns", 1, 6, 3, key="preview_cols")
+        cols_ui = st.columns(preview_cols)
+
+        for idx, item in enumerate(ordered_items):
+            with cols_ui[idx % preview_cols]:
+                st.image(st.session_state["images_bytes"][item["id"]], use_container_width=True)
+                st.markdown(
+                    f"""
+                    <div class="mini-card">
+                        <strong>{item.get("display_name", "Unknown Asset")}</strong>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+    with t3:
         st.subheader("📏 Image Sizing")
 
         sizing_option = st.radio(
@@ -468,54 +465,31 @@ if st.session_state["images_meta"]:
 
         font_size = st.slider("Label Font Size", 20, 120, 40)
 
-        btn1, btn2 = st.columns(2)
-
-        with btn1:
-            if st.button("🚀 GENERATE FINAL COLLAGE", use_container_width=True, type="primary"):
-                st.session_state["generated_collage"] = render_collage(
-                    st.session_state["images_meta"],
-                    mode,
-                    cols,
-                    gap,
-                    margin,
-                    radius,
-                    b_weight,
-                    b_color,
-                    bg_color,
-                    font_size,
-                    sizing_option
-                )
-
-        with btn2:
-            if st.button("🎨 CREATE ANOTHER COLLAGE", use_container_width=True, type="primary"):
-                st.session_state["alternate_collage"] = render_alternate_collage(
-                    st.session_state["images_meta"],
-                    bg_color="#F8FAFC",
-                    font_size=max(28, font_size - 4)
-                )
+        if st.button("🚀 GENERATE FINAL COLLAGE", use_container_width=True, type="primary"):
+            st.session_state["generated_collage"] = render_collage(
+                get_ordered_items(),
+                mode,
+                cols,
+                gap,
+                margin,
+                radius,
+                b_weight,
+                b_color,
+                bg_color,
+                font_size,
+                sizing_option
+            )
 
     if st.session_state["generated_collage"]:
-        st.subheader("🖼️ Standard Collage")
+        st.subheader("🖼️ Generated Collage")
         st.image(st.session_state["generated_collage"], use_container_width=True)
 
         buf = io.BytesIO()
         st.session_state["generated_collage"].save(buf, format="PNG")
         st.download_button(
-            "📥 Download Standard Collage",
+            "📥 Download Collage",
             buf.getvalue(),
             file_name="collage.png"
-        )
-
-    if st.session_state["alternate_collage"]:
-        st.subheader("🎨 Alternate Collage")
-        st.image(st.session_state["alternate_collage"], use_container_width=True)
-
-        buf2 = io.BytesIO()
-        st.session_state["alternate_collage"].save(buf2, format="PNG")
-        st.download_button(
-            "📥 Download Alternate Collage",
-            buf2.getvalue(),
-            file_name="alternate_collage.png"
         )
 
 else:
