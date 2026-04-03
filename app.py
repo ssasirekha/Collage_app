@@ -6,7 +6,6 @@ import base64
 import hashlib
 import requests
 from dataclasses import dataclass, asdict
-from typing import List, Dict, Tuple
 
 import streamlit as st
 from PIL import Image, ImageOps, ImageDraw, ImageFont, ImageColor
@@ -24,13 +23,15 @@ st.markdown("""
         color: white;
     }
     </style>
-    """, unsafe_allow_html=True)
+""", unsafe_allow_html=True)
+
 
 @dataclass
 class ImageItem:
     id: str
     original_file_name: str
-    display_name: str = "IMAGE"
+    display_name: str = "Processing..."
+
 
 if "images_meta" not in st.session_state:
     st.session_state["images_meta"] = []
@@ -51,7 +52,7 @@ def get_openai_client():
 def classify_image(raw_bytes: bytes):
     client = get_openai_client()
     if not client:
-        return {"name": "ASSET"}
+        return {"name": "Unknown Asset"}
 
     base_img = base64.b64encode(raw_bytes).decode("utf-8")
 
@@ -65,7 +66,9 @@ Rules:
 - Return a short display label of 1 to 3 words only.
 - Use title case.
 - Do not include extra explanation.
-- Do not guess wildly. If unclear, return "Unknown Asset".
+- Do not return the uploaded file name.
+- Focus on the actual visual object in the image.
+- If unclear, return "Unknown Asset".
 - Output only valid JSON in this format:
 {"name":"Label Here"}
 """
@@ -122,7 +125,6 @@ def render_collage(items, mode, cols, gap, margin, radius, b_weight, b_color, bg
 
     widths, heights = zip(*(i.size for i in pil_images))
 
-    # Logic for Image Sizing
     if sizing_option == "Enlarge to Largest":
         ref_w, ref_h = max(widths), max(heights)
     elif sizing_option == "Increase to Tallest":
@@ -151,11 +153,13 @@ def render_collage(items, mode, cols, gap, margin, radius, b_weight, b_color, bg
 
     canvas = Image.new("RGBA", (canvas_w, int(canvas_h)), ImageColor.getrgb(bg_color) + (255,))
 
-    # Font Support
     font_path = "Roboto-Bold.ttf"
     if not os.path.exists(font_path):
         try:
-            r = requests.get("https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Bold.ttf", timeout=10)
+            r = requests.get(
+                "https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Bold.ttf",
+                timeout=10
+            )
             with open(font_path, "wb") as f_f:
                 f_f.write(r.content)
         except Exception:
@@ -181,9 +185,14 @@ def render_collage(items, mode, cols, gap, margin, radius, b_weight, b_color, bg
 
         draw = ImageDraw.Draw(tile_cv)
         if b_weight > 0:
-            draw.rounded_rectangle((0, 0, tile_w, tile_h), radius=radius, outline=b_color, width=b_weight)
+            draw.rounded_rectangle(
+                (0, 0, tile_w, tile_h),
+                radius=radius,
+                outline=b_color,
+                width=b_weight
+            )
 
-        name_txt = item.get("display_name", "ASSET").upper()
+        name_txt = item.get("display_name", "UNKNOWN ASSET").upper()
 
         bbox = draw.textbbox((0, 0), name_txt, font=font)
         text_w = bbox[2] - bbox[0]
@@ -217,10 +226,14 @@ def render_collage(items, mode, cols, gap, margin, radius, b_weight, b_color, bg
     return canvas.convert("RGB")
 
 
-# --- 4. Sidebar & UI ---
+# --- 4. Sidebar & Upload Handling ---
 with st.sidebar:
     st.header("📤 Media Input")
-    uploaded_files = st.file_uploader("Upload Images", accept_multiple_files=True, type=["png", "jpg", "jpeg", "webp"])
+    uploaded_files = st.file_uploader(
+        "Upload Images",
+        accept_multiple_files=True,
+        type=["png", "jpg", "jpeg", "webp"]
+    )
 
     if uploaded_files:
         new_meta = []
@@ -237,7 +250,7 @@ with st.sidebar:
                     ImageItem(
                         id=uid,
                         original_file_name=f.name,
-                        display_name=os.path.splitext(f.name)[0]
+                        display_name="Processing..."
                     )
                 )
             )
@@ -257,10 +270,21 @@ with st.sidebar:
             for k in keys_to_delete:
                 del st.session_state[k]
 
-            for m in new_meta:
-                st.session_state[f"dn_{m['id']}"] = m["display_name"]
+            # Auto-run AI labeling immediately after upload
+            for m in st.session_state["images_meta"]:
+                res = classify_image(st.session_state["images_bytes"][m["id"]])
+                label = res.get("name", "Unknown Asset").strip()
+
+                if not label:
+                    label = "Unknown Asset"
+
+                st.session_state[f"dn_{m['id']}"] = label
+                m["display_name"] = label
+
+            st.rerun()
 
 
+# --- 5. Main UI ---
 if st.session_state["images_meta"]:
     st.markdown('<p class="main-header">🖼️ AI Image Studio</p>', unsafe_allow_html=True)
     t1, t2 = st.tabs(["📝 AI & Labels", "🎨 Style & Layout"])
@@ -270,7 +294,10 @@ if st.session_state["images_meta"]:
             with st.spinner("Analyzing..."):
                 for m in st.session_state["images_meta"]:
                     res = classify_image(st.session_state["images_bytes"][m["id"]])
-                    label = res.get("name", "Unknown Asset")
+                    label = res.get("name", "Unknown Asset").strip()
+
+                    if not label:
+                        label = "Unknown Asset"
 
                     st.session_state[f"dn_{m['id']}"] = label
                     m["display_name"] = label
@@ -281,18 +308,19 @@ if st.session_state["images_meta"]:
             col_a, col_b = st.columns([1, 5])
             col_a.image(st.session_state["images_bytes"][m["id"]], width=100)
 
-            current_label = st.session_state.get(f"dn_{m['id']}", m["display_name"])
+            current_label = st.session_state.get(f"dn_{m['id']}", "")
             new_label = col_b.text_input(
                 "Label",
-                value=current_label,
+                value=current_label if current_label else m["display_name"],
                 key=f"inp_{m['id']}"
             )
 
             st.session_state[f"dn_{m['id']}"] = new_label
-            m["display_name"] = new_label
+            m["display_name"] = new_label.strip() if new_label.strip() else "Unknown Asset"
 
     with t2:
         st.subheader("📏 Image Sizing")
+
         sizing_option = st.radio(
             "Scaling Method:",
             [
@@ -342,8 +370,13 @@ if st.session_state["images_meta"]:
 
     if st.session_state["generated_collage"]:
         st.image(st.session_state["generated_collage"], use_container_width=True)
+
         buf = io.BytesIO()
         st.session_state["generated_collage"].save(buf, format="PNG")
-        st.download_button("📥 Download Collage", buf.getvalue(), file_name="collage.png")
+        st.download_button(
+            "📥 Download Collage",
+            buf.getvalue(),
+            file_name="collage.png"
+        )
 else:
     st.info("Please upload images in the sidebar to start.")
