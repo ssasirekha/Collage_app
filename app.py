@@ -56,6 +56,9 @@ if "images_bytes" not in st.session_state:
 if "generated_collage" not in st.session_state:
     st.session_state["generated_collage"] = None
 
+if "flexible_collage" not in st.session_state:
+    st.session_state["flexible_collage"] = None
+
 if "image_order" not in st.session_state:
     st.session_state["image_order"] = []
 
@@ -336,6 +339,7 @@ with st.sidebar:
             st.session_state["images_bytes"] = new_bytes
             st.session_state["images_meta"] = new_meta
             st.session_state["generated_collage"] = None
+            st.session_state["flexible_collage"] = None
             st.session_state["image_order"] = [m["id"] for m in new_meta]
 
             keys_to_delete = [
@@ -394,7 +398,7 @@ if st.session_state["images_meta"]:
 
     with t2:
         st.subheader("↕ Flexible Grid Arrangement")
-        st.caption("Drag the image cards to reorder them. The collage will be created in this exact order.")
+        st.caption("Drag the image cards to reorder them. The flexible collage will use this exact order.")
 
         ordered_items = get_ordered_items()
 
@@ -435,6 +439,37 @@ if st.session_state["images_meta"]:
                     """,
                     unsafe_allow_html=True
                 )
+
+        st.divider()
+
+        fg1, fg2, fg3 = st.columns(3)
+        flex_cols = fg1.slider("Flexible Collage Columns", 1, 6, 3, key="flex_cols")
+        flex_gap = fg2.slider("Flexible Collage Gap", 0, 150, 35, key="flex_gap")
+        flex_margin = fg3.slider("Flexible Collage Margin", 0, 200, 60, key="flex_margin")
+
+        fg4, fg5, fg6 = st.columns(3)
+        flex_radius = fg4.slider("Flexible Corner Rounding", 0, 100, 24, key="flex_radius")
+        flex_border = fg5.slider("Flexible Border Thickness", 0, 20, 4, key="flex_border")
+        flex_font = fg6.slider("Flexible Label Font Size", 20, 120, 36, key="flex_font")
+
+        fg7, fg8 = st.columns(2)
+        flex_b_color = fg7.color_picker("Flexible Border Color", "#2563EB", key="flex_b_color")
+        flex_bg_color = fg8.color_picker("Flexible Background Color", "#FFFFFF", key="flex_bg_color")
+
+        if st.button("📦 GENERATE FLEXIBLE COLLAGE", use_container_width=True, type="primary"):
+            st.session_state["flexible_collage"] = render_collage(
+                get_ordered_items(),
+                mode="Grid",
+                cols=flex_cols,
+                gap=flex_gap,
+                margin=flex_margin,
+                radius=flex_radius,
+                b_weight=flex_border,
+                b_color=flex_b_color,
+                bg_color=flex_bg_color,
+                font_size=flex_font,
+                sizing_option="Enlarge to Largest"
+            )
 
     with t3:
         st.subheader("📏 Image Sizing")
@@ -485,6 +520,19 @@ if st.session_state["images_meta"]:
                 font_size,
                 sizing_option
             )
+
+    if st.session_state["flexible_collage"]:
+        st.subheader("↕ Flexible Collage")
+        st.image(st.session_state["flexible_collage"], use_container_width=True)
+
+        buf_flex = io.BytesIO()
+        st.session_state["flexible_collage"].save(buf_flex, format="PNG")
+        st.download_button(
+            "📥 Download Flexible Collage",
+            buf_flex.getvalue(),
+            file_name="flexible_collage.png",
+            use_container_width=True
+        )
 
     if st.session_state["generated_collage"]:
         st.subheader("🖼️ Generated Collage")
