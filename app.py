@@ -21,12 +21,10 @@ st.markdown("""
     .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; background-color: #f1f5f9; border-radius: 4px 4px 0 0; padding: 10px 20px; }
     .stTabs [aria-selected="true"] { background-color: #e2e8f0; font-weight: bold; }
     
-    /* Highlight AI Button */
     div.stButton > button:first-child[kind="primary"] {
         background-color: #ff4b4b;
         border-color: #ff4b4b;
         color: white;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
     }
     </style>
     """, unsafe_allow_html=True)
@@ -52,7 +50,6 @@ def classify_image(raw_bytes: bytes):
     if not client: return None
     base_img = base64.b64encode(raw_bytes).decode("utf-8")
     try:
-        # Improved prompt for industrial hardware labeling
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": [
@@ -71,7 +68,7 @@ def render_collage(items, mode, cols, gap, margin, radius, b_weight, b_color, bg
     pil_images = [Image.open(io.BytesIO(st.session_state["images_bytes"][m['id']])).convert("RGB") for m in items]
     widths, heights = zip(*(i.size for i in pil_images))
     
-    # Sizing Logic
+    # Image Sizing Logic
     if sizing_option == "Enlarge to Largest": ref_w, ref_h = max(widths), max(heights)
     elif sizing_option == "Shrink to Smallest": ref_w, ref_h = min(widths), min(heights)
     elif sizing_option == "Match Width": ref_w = max(widths); ref_h = ref_w 
@@ -89,12 +86,12 @@ def render_collage(items, mode, cols, gap, margin, radius, b_weight, b_color, bg
     
     canvas = Image.new("RGBA", (canvas_w, int(canvas_h)), ImageColor.getrgb(bg_color) + (255,))
     
-    # Cloud Font Fix: Auto-download Roboto if missing
+    # Cloud Font Fix
     font_path = "Roboto-Bold.ttf"
     if not os.path.exists(font_path):
         try:
             r = requests.get("https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Bold.ttf")
-            with open(font_path, "wb") as f: f.write(r.content)
+            with open(font_path, "wb") as f_file: f_file.write(r.content)
         except: pass
 
     try: font = ImageFont.truetype(font_path, font_size)
@@ -109,6 +106,7 @@ def render_collage(items, mode, cols, gap, margin, radius, b_weight, b_color, bg
         x = ((canvas_w - row_w) // 2) + c * (tile_w + gap)
         y = margin + r * (tile_h + gap)
 
+        # Auto-Scale Logic
         img = ImageOps.fit(raw_img, (tile_w, tile_h), Image.LANCZOS)
         mask = Image.new("L", (tile_w, tile_h), 0)
         ImageDraw.Draw(mask).rounded_rectangle((0,0,tile_w,tile_h), radius=radius, fill=255)
@@ -120,7 +118,7 @@ def render_collage(items, mode, cols, gap, margin, radius, b_weight, b_color, bg
         if b_weight > 0:
             draw.rounded_rectangle((0,0,tile_w,tile_h), radius=radius, outline=b_color, width=b_weight)
         
-        # Centered Label Pill
+        # Label Rendering
         name_txt = st.session_state.get(f"dn_{item['id']}", item['display_name']).upper()
         bbox = draw.textbbox((0,0), name_txt, font=font)
         tw, th = bbox[2]-bbox[0]+60, bbox[3]-bbox[1]+30
@@ -139,9 +137,9 @@ with st.sidebar:
     uploaded_files = st.file_uploader("Upload Images", accept_multiple_files=True)
     
     if uploaded_files:
-        # Fixed NameError by correctly iterating through files
         if len(uploaded_files) != len(st.session_state["images_meta"]):
             new_meta, new_bytes = [], {}
+            # FIX: Explicit loop to define 'f' and prevent NameError
             for i, f in enumerate(uploaded_files):
                 uid = f"img_{i}"
                 new_bytes[uid] = f.getvalue()
