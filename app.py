@@ -3,7 +3,6 @@ import os
 import math
 import json
 import base64
-import hashlib
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Tuple
 from collections import defaultdict
@@ -16,16 +15,10 @@ try:
 except Exception:
     OpenAI = None
 
-try:
-    from streamlit_elements import elements, dashboard, mui, sync
-    ELEMENTS_AVAILABLE = True
-except Exception:
-    ELEMENTS_AVAILABLE = False
-
 
 st.set_page_config(page_title="AI Collage Studio", page_icon="🖼️", layout="wide")
 st.title("🖼️ AI Collage Studio")
-st.caption("Upload images, classify them, edit names, drag and place images, and generate a polished collage.")
+st.caption("Upload images, classify them, edit classifier-generated names, and build a cleaner presentation-ready collage.")
 
 
 @dataclass
@@ -38,10 +31,6 @@ class ImageItem:
     confidence: int = 0
     display_order: int = 0
     highlight: bool = False
-    grid_x: int = 0
-    grid_y: int = 0
-    grid_w: int = 3
-    grid_h: int = 4
 
 
 # --------------------------------------------------
@@ -139,41 +128,26 @@ def parse_json_from_text(text: str) -> Dict:
     return {}
 
 
-def create_mask(size: Tuple[int, int], radius: int, shape_style: str = "Rounded Rectangle") -> Image.Image:
-    w, h = size
+def create_rounded_mask(size: Tuple[int, int], radius: int) -> Image.Image:
     mask = Image.new("L", size, 0)
     draw = ImageDraw.Draw(mask)
-
-    if shape_style == "Rectangle":
-        draw.rectangle((0, 0, w, h), fill=255)
-    elif shape_style == "Rounded Rectangle":
-        draw.rounded_rectangle((0, 0, w, h), radius=radius, fill=255)
-    elif shape_style == "Ellipse":
-        draw.ellipse((0, 0, w, h), fill=255)
-    elif shape_style == "Circle":
-        side = min(w, h)
-        x0 = (w - side) // 2
-        y0 = (h - side) // 2
-        draw.ellipse((x0, y0, x0 + side, y0 + side), fill=255)
-    else:
-        draw.rounded_rectangle((0, 0, w, h), radius=radius, fill=255)
-
+    draw.rounded_rectangle((0, 0, size[0], size[1]), radius=radius, fill=255)
     return mask
 
 
-def fit_to_tile(img: Image.Image, size: Tuple[int, int], radius: int, shape_style: str) -> Image.Image:
+def fit_to_tile(img: Image.Image, size: Tuple[int, int], radius: int) -> Image.Image:
     fitted = ImageOps.fit(img, size, method=Image.Resampling.LANCZOS)
     fitted = fitted.convert("RGBA")
-    mask = create_mask(size, radius, shape_style)
+    mask = create_rounded_mask(size, radius)
     canvas = Image.new("RGBA", size, (255, 255, 255, 0))
     canvas.paste(fitted, (0, 0), mask)
     return canvas
 
 
-def add_shadow(card: Image.Image, radius: int = 18, blur: int = 12, offset=(6, 8), opacity: int = 65, shape_style: str = "Rounded Rectangle") -> Image.Image:
+def add_shadow(card: Image.Image, radius: int = 18, blur: int = 12, offset=(6, 8), opacity: int = 65) -> Image.Image:
     shadow_canvas = Image.new("RGBA", (card.width + 40, card.height + 40), (0, 0, 0, 0))
     shadow_shape = Image.new("RGBA", card.size, (0, 0, 0, opacity))
-    mask = create_mask(card.size, radius, shape_style)
+    mask = create_rounded_mask(card.size, radius)
     shadow_canvas.paste(shadow_shape, (14 + offset[0], 14 + offset[1]), mask)
     shadow_canvas = shadow_canvas.filter(ImageFilter.GaussianBlur(blur))
     shadow_canvas.paste(card, (14, 14), card)
@@ -211,28 +185,6 @@ def draw_wrapped_text(draw, x: int, y: int, text: str, font, fill, max_width: in
         draw.text((x, cur_y), line, font=font, fill=fill)
         bbox = draw.textbbox((0, 0), line, font=font)
         cur_y += (bbox[3] - bbox[1]) + line_gap
-
-
-def upload_signature(files) -> str:
-    parts = []
-    for f in files:
-        content = f.getvalue()
-        digest = hashlib.md5(content).hexdigest()
-        parts.append(f"{f.name}:{len(content)}:{digest}")
-    joined = "|".join(parts)
-    return hashlib.md5(joined.encode()).hexdigest()
-
-
-def tile_ratio(shape_format: str) -> float:
-    if shape_format == "Landscape":
-        return 0.72
-    if shape_format == "Portrait":
-        return 1.18
-    if shape_format == "Square":
-        return 1.0
-    if shape_format == "Tall Portrait":
-        return 1.35
-    return 0.92
 
 
 # --------------------------------------------------
@@ -302,10 +254,6 @@ def ensure_state():
         st.session_state["images_bytes"] = {}
     if "generated_collage" not in st.session_state:
         st.session_state["generated_collage"] = None
-    if "upload_sig" not in st.session_state:
-        st.session_state["upload_sig"] = None
-    if "dashboard_layout" not in st.session_state:
-        st.session_state["dashboard_layout"] = []
 
 
 def get_meta_items() -> List[ImageItem]:
@@ -335,51 +283,15 @@ def sync_edits_from_widgets():
     return updated
 
 
-def init_dashboard_layout(items: List[ImageItem]):
-    st.session_state["dashboard_layout"] = [
-        dashboard.Item(
-            item.id,
-            item.grid_x,
-            item.grid_y,
-            item.grid_w,
-            item.grid_h,
-            isDraggable=True,
-            isResizable=True,
-        )
-        for item in items
-    ]
-
-
-def sync_dashboard_to_meta():
-    items = get_meta_items()
-    layout_map = {}
-
-    raw_layout = st.session_state.get("dashboard", None)
-    if raw_layout:
-        for entry in raw_layout:
-            layout_map[entry["i"]] = entry
-
-    for item in items:
-        if item.id in layout_map:
-            entry = layout_map[item.id]
-            item.grid_x = int(entry["x"])
-            item.grid_y = int(entry["y"])
-            item.grid_w = int(entry["w"])
-            item.grid_h = int(entry["h"])
-
-    set_meta_items(items)
-    return items
-
-
 # --------------------------------------------------
 # Collage drawing
 # --------------------------------------------------
-def draw_card(canvas: Image.Image, img: Image.Image, item: ImageItem, box, radius: int, show_category_tag: bool, shape_style: str):
+def draw_card(canvas: Image.Image, img: Image.Image, item: ImageItem, box, radius: int, show_category_tag: bool):
     x1, y1, x2, y2 = box
     w = x2 - x1
     h = y2 - y1
 
-    tile = fit_to_tile(img, (w, h), radius, shape_style)
+    tile = fit_to_tile(img, (w, h), radius)
     card = Image.new("RGBA", (w, h), (255, 255, 255, 0))
     card.paste(tile, (0, 0), tile)
 
@@ -407,7 +319,7 @@ def draw_card(canvas: Image.Image, img: Image.Image, item: ImageItem, box, radiu
     title = item.display_name.strip() if item.display_name else "Image Highlight"
     draw_wrapped_text(draw, text_x, cur_y, title[:70], title_font, (28, 28, 28), w - 40)
 
-    shadowed = add_shadow(card, radius=radius, shape_style=shape_style)
+    shadowed = add_shadow(card, radius=radius)
     canvas.alpha_composite(shadowed, (x1 - 14, y1 - 14))
 
 
@@ -422,8 +334,6 @@ def build_grouped_collage(
     show_group_headings: bool = False,
     section_title_align: str = "Left",
     highlight_scale: float = 1.12,
-    shape_style: str = "Rounded Rectangle",
-    shape_format: str = "Classic",
 ):
     groups = defaultdict(list)
     for item in items:
@@ -440,7 +350,7 @@ def build_grouped_collage(
 
     usable_w = width - 2 * side_margin
     base_tile_w = (usable_w - (images_per_row - 1) * gap) // images_per_row
-    base_tile_h = int(base_tile_w * tile_ratio(shape_format))
+    base_tile_h = int(base_tile_w * 0.92)
 
     est_h = top_margin + 10
     for _, g in groups.items():
@@ -487,7 +397,7 @@ def build_grouped_collage(
                 y2 = y1 + cur_h
 
                 img = safe_open_image(st.session_state["images_bytes"][item.id])
-                draw_card(canvas, img, item, (x1, y1, x2, y2), radius, show_category_tag, shape_style)
+                draw_card(canvas, img, item, (x1, y1, x2, y2), radius, show_category_tag)
 
             idx += images_per_row
 
@@ -504,19 +414,20 @@ def build_grid_collage(
     gap: int,
     radius: int,
     show_category_tag: bool,
-    shape_style: str,
-    shape_format: str,
 ):
     canvas = Image.new("RGBA", (width, height), bg_rgb + (255,))
     margin_x = 44
     margin_y = 28
+    margin_bottom = 30
 
     cols = math.ceil(math.sqrt(len(items)))
     rows = math.ceil(len(items) / cols)
 
     usable_w = width - 2 * margin_x - (cols - 1) * gap
+    usable_h = height - margin_y - margin_bottom - (rows - 1) * gap
+
     tile_w = max(160, usable_w // cols)
-    tile_h = max(170, int(tile_w * tile_ratio(shape_format)))
+    tile_h = max(170, int(tile_w * 0.92))
 
     idx = 0
     for r in range(rows):
@@ -532,42 +443,8 @@ def build_grid_collage(
             x2 = x1 + tile_w
             y2 = y1 + tile_h
             img = safe_open_image(st.session_state["images_bytes"][item.id])
-            draw_card(canvas, img, item, (x1, y1, x2, y2), radius, show_category_tag, shape_style)
+            draw_card(canvas, img, item, (x1, y1, x2, y2), radius, show_category_tag)
             idx += 1
-
-    return canvas.convert("RGB")
-
-
-def build_manual_grid_collage(
-    items: List[ImageItem],
-    width: int,
-    bg_rgb: Tuple[int, int, int],
-    radius: int,
-    show_category_tag: bool,
-    shape_style: str,
-):
-    cols = 12
-    gutter = 12
-    canvas_margin = 20
-    cell_px = (width - 2 * canvas_margin) / cols
-
-    max_bottom = 0
-    for item in items:
-        bottom = (item.grid_y + item.grid_h) * cell_px
-        if bottom > max_bottom:
-            max_bottom = bottom
-
-    height = max(900, int(max_bottom + 80))
-    canvas = Image.new("RGBA", (width, height), bg_rgb + (255,))
-
-    for item in items:
-        x1 = int(canvas_margin + item.grid_x * cell_px + gutter / 2)
-        y1 = int(canvas_margin + item.grid_y * cell_px + gutter / 2)
-        x2 = int(canvas_margin + (item.grid_x + item.grid_w) * cell_px - gutter / 2)
-        y2 = int(canvas_margin + (item.grid_y + item.grid_h) * cell_px - gutter / 2)
-
-        img = safe_open_image(st.session_state["images_bytes"][item.id])
-        draw_card(canvas, img, item, (x1, y1, x2, y2), radius, show_category_tag, shape_style)
 
     return canvas.convert("RGB")
 
@@ -580,20 +457,12 @@ ensure_state()
 with st.sidebar:
     st.header("Settings")
 
-    base_layout_options = ["Grouped by AI Category", "Grid"]
-    if ELEMENTS_AVAILABLE:
-        base_layout_options.append("Flexible Grid")
-
-    layout_style = st.selectbox("Layout Style", base_layout_options, index=0)
+    layout_style = st.selectbox("Layout Style", ["Grouped by AI Category", "Grid"], index=0)
     aspect_ratio = st.selectbox("Canvas Ratio", ["16:9", "4:3", "1:1"], index=0)
     canvas_width = st.slider("Canvas Width", 1200, 4000, 2200, 100)
     gap = st.slider("Spacing", 8, 40, 14, 2)
     radius = st.slider("Corner Radius", 0, 40, 16, 2)
     bg_color = st.color_picker("Background Color", "#F4F4F6")
-
-    st.subheader("Tile Options")
-    shape_style = st.selectbox("Shape Style", ["Rounded Rectangle", "Rectangle", "Ellipse", "Circle"], index=0)
-    shape_format = st.selectbox("Shape Format", ["Classic", "Landscape", "Portrait", "Square", "Tall Portrait"], index=0)
 
     st.subheader("Label Options")
     show_category_tag = st.toggle("Show category on each card", value=False)
@@ -615,41 +484,29 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
-    new_sig = upload_signature(uploaded_files)
-    if st.session_state["upload_sig"] != new_sig:
-        meta_items = []
-        image_bytes = {}
+    meta_items = []
+    image_bytes = {}
 
-        for idx, file in enumerate(uploaded_files):
-            try:
-                file_bytes = file.getvalue()
-                _ = safe_open_image(file_bytes)
-                uid = f"img_{idx}_{hashlib.md5(file_bytes).hexdigest()[:10]}"
-                image_bytes[uid] = file_bytes
-
-                row = idx // 4
-                col = idx % 4
-
-                meta_items.append(
-                    ImageItem(
-                        id=uid,
-                        original_file_name=file.name,
-                        display_order=idx + 1,
-                        grid_x=col * 3,
-                        grid_y=row * 4,
-                        grid_w=3,
-                        grid_h=4,
-                    )
+    for idx, file in enumerate(uploaded_files):
+        try:
+            file_bytes = file.getvalue()
+            _ = safe_open_image(file_bytes)
+            uid = f"img_{idx}_{file.name}"
+            image_bytes[uid] = file_bytes
+            meta_items.append(
+                ImageItem(
+                    id=uid,
+                    original_file_name=file.name,
+                    display_order=idx + 1,
                 )
-            except Exception as e:
-                st.warning(f"Could not read {file.name}: {e}")
+            )
+        except Exception as e:
+            st.warning(f"Could not read {file.name}: {e}")
 
-        st.session_state["images_bytes"] = image_bytes
-        set_meta_items(meta_items)
-        push_meta_to_widget_state()
-        init_dashboard_layout(meta_items)
-        st.session_state["generated_collage"] = None
-        st.session_state["upload_sig"] = new_sig
+    st.session_state["images_bytes"] = image_bytes
+    set_meta_items(meta_items)
+    push_meta_to_widget_state()
+    st.session_state["generated_collage"] = None
 
 items = get_meta_items()
 
@@ -706,71 +563,10 @@ if items:
 
 items = sync_edits_from_widgets()
 
-if layout_style == "Flexible Grid":
-    if not ELEMENTS_AVAILABLE:
-        st.warning("Flexible Grid needs `streamlit-elements` installed.")
-    else:
-        st.subheader("Flexible Grid Editor")
-        st.caption("Drag and resize the cards below. Then click Generate Collage.")
-
-        if "dashboard_layout" not in st.session_state or not st.session_state["dashboard_layout"]:
-            init_dashboard_layout(items)
-
-        with elements("flex_grid_editor"):
-            with dashboard.Grid(
-                st.session_state["dashboard_layout"],
-                cols=12,
-                rowHeight=70,
-                onLayoutChange=sync("dashboard"),
-                draggableHandle=".drag-handle",
-            ):
-                for item in items:
-                    img_b64 = base64.b64encode(st.session_state["images_bytes"][item.id]).decode()
-                    card_title = st.session_state.get(f"display_name_{item.id}", item.display_name)
-
-                    with mui.Paper(
-                        key=item.id,
-                        elevation=3,
-                        sx={
-                            "display": "flex",
-                            "flexDirection": "column",
-                            "height": "100%",
-                            "borderRadius": "18px",
-                            "overflow": "hidden",
-                            "backgroundColor": "#ffffff",
-                        },
-                    ):
-                        with mui.Box(
-                            className="drag-handle",
-                            sx={
-                                "padding": "8px 12px",
-                                "cursor": "move",
-                                "fontSize": "13px",
-                                "fontWeight": 600,
-                                "backgroundColor": "#f7f7fa",
-                                "borderBottom": "1px solid #ececf2",
-                                "lineHeight": 1.3,
-                            },
-                        ):
-                            mui.Typography(card_title)
-
-                        mui.Box(
-                            component="img",
-                            src=f"data:image/png;base64,{img_b64}",
-                            sx={
-                                "width": "100%",
-                                "height": "calc(100% - 44px)",
-                                "objectFit": "cover",
-                            },
-                        )
-
 if items and st.button("Generate Collage", type="primary", use_container_width=True):
     items = sync_edits_from_widgets()
-
-    if layout_style == "Flexible Grid" and ELEMENTS_AVAILABLE:
-        items = sync_dashboard_to_meta()
-
     ordered_items = sorted(items, key=lambda x: (x.category, x.display_order, x.original_file_name))
+
     width = canvas_width
     bg_rgb = hex_to_rgb(bg_color)
 
@@ -793,17 +589,6 @@ if items and st.button("Generate Collage", type="primary", use_container_width=T
             show_group_headings=show_group_headings,
             section_title_align=section_title_align,
             highlight_scale=highlight_scale,
-            shape_style=shape_style,
-            shape_format=shape_format,
-        )
-    elif layout_style == "Flexible Grid" and ELEMENTS_AVAILABLE:
-        collage = build_manual_grid_collage(
-            items=items,
-            width=width,
-            bg_rgb=bg_rgb,
-            radius=radius,
-            show_category_tag=show_category_tag,
-            shape_style=shape_style,
         )
     else:
         collage = build_grid_collage(
@@ -814,8 +599,6 @@ if items and st.button("Generate Collage", type="primary", use_container_width=T
             gap=gap,
             radius=radius,
             show_category_tag=show_category_tag,
-            shape_style=shape_style,
-            shape_format=shape_format,
         )
 
     st.session_state["generated_collage"] = collage
@@ -836,9 +619,13 @@ if st.session_state["generated_collage"] is not None:
     with d3:
         st.download_button("Download PDF", data=pdf_data, file_name="ai_collage.pdf", mime="application/pdf", use_container_width=True)
 
-with st.expander("Notes"):
+with st.expander("Recommended settings"):
     st.markdown(
-        "- Flexible Grid uses a drag-and-resize editor and saves tile positions into the image metadata.\n"
-        "- Edited names are preserved unless the uploaded file set changes.\n"
-        "- Add `streamlit-elements==0.1.0` to requirements for drag-and-place support.\n"
+        "- Layout Style: **Grouped by AI Category**\n"
+        "- Images Per Row: **3**\n"
+        "- Show category on each card: **Off**\n"
+        "- Show category group headings: **Off**\n"
+        "- Spacing: **14**\n"
+        "- Corner Radius: **16**\n"
+        "- After classification, the edit fields open with the classifier-generated name.\n"
     )
