@@ -63,6 +63,7 @@ def render_collage(items, mode, cols, gap, margin, radius, b_weight, b_color, bg
     pil_images = [Image.open(io.BytesIO(st.session_state["images_bytes"][m['id']])).convert("RGB") for m in items]
     widths, heights = zip(*(i.size for i in pil_images))
     
+    # Sizing Logic
     if sizing_option == "Enlarge to Largest": ref_w, ref_h = max(widths), max(heights)
     elif sizing_option == "Shrink to Smallest": ref_w, ref_h = min(widths), min(heights)
     elif sizing_option == "Match Width": ref_w = max(widths); ref_h = ref_w 
@@ -74,12 +75,14 @@ def render_collage(items, mode, cols, gap, margin, radius, b_weight, b_color, bg
     cols = count if mode == "Horizontal" else (1 if mode == "Vertical" else cols)
     rows = math.ceil(count / cols)
 
+    # Calculate tile size including the gap
     tile_w = (canvas_w - (2 * margin) - (cols - 1) * gap) // cols
     tile_h = int(tile_w * (ref_h / ref_w))
     canvas_h = (rows * tile_h) + ((rows - 1) * gap) + (2 * margin)
     
     canvas = Image.new("RGBA", (canvas_w, int(canvas_h)), ImageColor.getrgb(bg_color) + (255,))
     
+    # Font Loader for Cloud
     font_path = "Roboto-Bold.ttf"
     if not os.path.exists(font_path):
         try:
@@ -91,11 +94,9 @@ def render_collage(items, mode, cols, gap, margin, radius, b_weight, b_color, bg
 
     for idx, (item, raw_img) in enumerate(zip(items, pil_images)):
         r, c = divmod(idx, cols)
-        rem = count - (r * cols)
-        row_cols = min(rem, cols)
-        row_w = (row_cols * tile_w) + ((row_cols - 1) * gap)
         
-        x = ((canvas_w - row_w) // 2) + c * (tile_w + gap)
+        # Calculate X/Y position with inner gap and outer margin
+        x = margin + c * (tile_w + gap)
         y = margin + r * (tile_h + gap)
 
         img = ImageOps.fit(raw_img, (tile_w, tile_h), Image.LANCZOS)
@@ -109,6 +110,7 @@ def render_collage(items, mode, cols, gap, margin, radius, b_weight, b_color, bg
         if b_weight > 0:
             draw.rounded_rectangle((0,0,tile_w,tile_h), radius=radius, outline=b_color, width=b_weight)
         
+        # Centered Labels
         name_txt = st.session_state.get(f"dn_{item['id']}", item['display_name']).upper()
         bbox = draw.textbbox((0,0), name_txt, font=font)
         tw, th = bbox[2]-bbox[0]+60, bbox[3]-bbox[1]+30
@@ -129,6 +131,7 @@ with st.sidebar:
     if uploaded_files:
         if len(uploaded_files) != len(st.session_state["images_meta"]):
             new_meta, new_bytes = [], {}
+            # Resolved NameError: Explicit loop for 'f'
             for i, f in enumerate(uploaded_files):
                 uid = f"img_{i}"
                 new_bytes[uid] = f.getvalue()
@@ -154,26 +157,25 @@ if st.session_state["images_meta"]:
 
     with t2:
         st.subheader("📏 Image Sizing")
-        sizing_option = st.radio("Scaling Method:", 
-                                ["Keep Original", "Enlarge to Largest", "Shrink to Smallest", "Match Width", "Match Height"], 
-                                horizontal=True, index=4) # Default: Match Height
+        sizing_option = st.radio("Scaling Method:", ["Keep Original", "Enlarge to Largest", "Shrink to Smallest", "Match Width", "Match Height"], horizontal=True, index=1) 
         
         st.divider()
         col1, col2 = st.columns(2)
-        mode = col1.selectbox("Layout Mode", ["Grid", "Horizontal", "Vertical"], index=0) # Default: Grid
-        cols = col2.slider("Columns", 1, 6, 3) # Default: 3
+        mode = col1.selectbox("Layout Mode", ["Grid", "Horizontal", "Vertical"], index=0)
+        cols = col2.slider("Columns", 1, 6, 3)
         
+        # Space Controls
         col3, col4, col5 = st.columns(3)
-        gap = col3.slider("Inner Gap", 0, 150, 40) # Default: 40
-        margin = col4.slider("Outer Margin", 0, 200, 60) # Default: 60
-        radius = col5.slider("Corner Rounding", 0, 100, 30) # Default: 30
+        gap = col3.slider("Inner Gap (Grid Spacing)", 0, 150, 40)
+        margin = col4.slider("Outer Margin", 0, 200, 60)
+        radius = col5.slider("Corner Rounding", 0, 100, 30)
         
         col6, col7, col8 = st.columns(3)
-        b_weight = col6.slider("Border", 0, 20, 5) # Default: 5
+        b_weight = col6.slider("Border Thickness", 0, 20, 5)
         b_color = col7.color_picker("Border Color", "#0000FF") # Default: Blue
-        bg_color = col8.color_picker("Background", "#FFFFFF") # Default: White
+        bg_color = col8.color_picker("Background Color", "#FFFFFF") # Default: White
         
-        font_size = st.slider("Label Font Size", 20, 120, 40) # Default: 40
+        font_size = st.slider("Label Font Size", 20, 120, 40)
 
     if st.button("🚀 GENERATE FINAL COLLAGE", use_container_width=True, type="primary"):
         st.session_state["generated_collage"] = render_collage(st.session_state["images_meta"], mode, cols, gap, margin, radius, b_weight, b_color, bg_color, font_size, sizing_option)
