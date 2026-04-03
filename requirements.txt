@@ -2,3 +2,4 @@ streamlit
 Pillow
 openai
 requests
+streamlit-elements==0.1.0
