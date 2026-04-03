@@ -4,379 +4,841 @@ import math
 import json
 import base64
 import hashlib
-import requests
 from dataclasses import dataclass, asdict
+from typing import List, Dict, Tuple
+from collections import defaultdict
 
 import streamlit as st
-from PIL import Image, ImageOps, ImageDraw, ImageFont, ImageColor
-from openai import OpenAI
+from PIL import Image, ImageOps, ImageDraw, ImageFont, ImageFilter, ImageColor
 
-# --- 1. Setup & State ---
-st.set_page_config(page_title="AI Asset Studio Pro", page_icon="🖼️", layout="wide")
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
 
-st.markdown("""
-    <style>
-    .main-header { font-size: 2.2rem; font-weight: 800; color: #1e293b; margin-bottom: 1rem; }
-    div.stButton > button:first-child[kind="primary"] {
-        background-color: #ff4b4b;
-        border-color: #ff4b4b;
-        color: white;
-    }
-    </style>
-""", unsafe_allow_html=True)
+try:
+    from streamlit_elements import elements, dashboard, mui, sync
+    ELEMENTS_AVAILABLE = True
+except Exception:
+    ELEMENTS_AVAILABLE = False
+
+
+st.set_page_config(page_title="AI Collage Studio", page_icon="🖼️", layout="wide")
+st.title("🖼️ AI Collage Studio")
+st.caption("Upload images, classify them, edit names, drag and place images, and generate a polished collage.")
 
 
 @dataclass
 class ImageItem:
     id: str
     original_file_name: str
-    display_name: str = "Processing..."
+    category: str = "General"
+    subcategory: str = "General"
+    display_name: str = "Image Highlight"
+    confidence: int = 0
+    display_order: int = 0
+    highlight: bool = False
+    grid_x: int = 0
+    grid_y: int = 0
+    grid_w: int = 3
+    grid_h: int = 4
 
 
-if "images_meta" not in st.session_state:
-    st.session_state["images_meta"] = []
-
-if "images_bytes" not in st.session_state:
-    st.session_state["images_bytes"] = {}
-
-if "generated_collage" not in st.session_state:
-    st.session_state["generated_collage"] = None
-
-
-# --- 2. AI Logic ---
+# --------------------------------------------------
+# Utilities
+# --------------------------------------------------
 def get_openai_client():
-    api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-    return OpenAI(api_key=api_key.strip()) if api_key else None
+    api_key = ""
+    try:
+        api_key = st.secrets.get("OPENAI_API_KEY", "").strip()
+    except Exception:
+        api_key = os.getenv("OPENAI_API_KEY", "").strip()
 
-
-def classify_image(raw_bytes: bytes):
-    client = get_openai_client()
-    if not client:
-        return {"name": "Unknown Asset"}
-
-    base_img = base64.b64encode(raw_bytes).decode("utf-8")
-
-    prompt = """
-You are an image labelling assistant.
-
-Task:
-Look at the uploaded image and identify the main object clearly.
-
-Rules:
-- Return a short display label of 1 to 3 words only.
-- Use title case.
-- Do not include extra explanation.
-- Do not return the uploaded file name.
-- Focus on the actual visual object in the image.
-- If unclear, return "Unknown Asset".
-- Output only valid JSON in this format:
-{"name":"Label Here"}
-"""
+    if not api_key or OpenAI is None:
+        return None
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
+        return OpenAI(api_key=api_key)
+    except Exception:
+        return None
+
+
+def load_font(size: int, bold: bool = False):
+    candidates = []
+    if bold:
+        candidates = [
+            "DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "arialbd.ttf",
+        ]
+    else:
+        candidates = [
+            "DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "arial.ttf",
+        ]
+
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size=size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def safe_open_image(file_bytes: bytes) -> Image.Image:
+    img = Image.open(io.BytesIO(file_bytes))
+    return img.convert("RGB")
+
+
+def pil_to_bytes(img: Image.Image, fmt: str = "PNG", quality: int = 95) -> bytes:
+    buffer = io.BytesIO()
+    save_kwargs = {}
+
+    if fmt.upper() == "JPEG":
+        img = img.convert("RGB")
+        save_kwargs["quality"] = quality
+        save_kwargs["optimize"] = True
+
+    if fmt.upper() == "PDF":
+        img = img.convert("RGB")
+
+    img.save(buffer, format=fmt.upper(), **save_kwargs)
+    return buffer.getvalue()
+
+
+def hex_to_rgb(color_hex: str) -> Tuple[int, int, int]:
+    return ImageColor.getrgb(color_hex)
+
+
+def image_to_data_uri(raw_bytes: bytes, mime_type: str = "image/png") -> str:
+    encoded = base64.b64encode(raw_bytes).decode("utf-8")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def parse_json_from_text(text: str) -> Dict:
+    if not text:
+        return {}
+
+    text = text.strip()
+
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidate = text[start:end + 1]
+        try:
+            return json.loads(candidate)
+        except Exception:
+            return {}
+
+    return {}
+
+
+def create_mask(size: Tuple[int, int], radius: int, shape_style: str = "Rounded Rectangle") -> Image.Image:
+    w, h = size
+    mask = Image.new("L", size, 0)
+    draw = ImageDraw.Draw(mask)
+
+    if shape_style == "Rectangle":
+        draw.rectangle((0, 0, w, h), fill=255)
+    elif shape_style == "Rounded Rectangle":
+        draw.rounded_rectangle((0, 0, w, h), radius=radius, fill=255)
+    elif shape_style == "Ellipse":
+        draw.ellipse((0, 0, w, h), fill=255)
+    elif shape_style == "Circle":
+        side = min(w, h)
+        x0 = (w - side) // 2
+        y0 = (h - side) // 2
+        draw.ellipse((x0, y0, x0 + side, y0 + side), fill=255)
+    else:
+        draw.rounded_rectangle((0, 0, w, h), radius=radius, fill=255)
+
+    return mask
+
+
+def fit_to_tile(img: Image.Image, size: Tuple[int, int], radius: int, shape_style: str) -> Image.Image:
+    fitted = ImageOps.fit(img, size, method=Image.Resampling.LANCZOS)
+    fitted = fitted.convert("RGBA")
+    mask = create_mask(size, radius, shape_style)
+    canvas = Image.new("RGBA", size, (255, 255, 255, 0))
+    canvas.paste(fitted, (0, 0), mask)
+    return canvas
+
+
+def add_shadow(card: Image.Image, radius: int = 18, blur: int = 12, offset=(6, 8), opacity: int = 65, shape_style: str = "Rounded Rectangle") -> Image.Image:
+    shadow_canvas = Image.new("RGBA", (card.width + 40, card.height + 40), (0, 0, 0, 0))
+    shadow_shape = Image.new("RGBA", card.size, (0, 0, 0, opacity))
+    mask = create_mask(card.size, radius, shape_style)
+    shadow_canvas.paste(shadow_shape, (14 + offset[0], 14 + offset[1]), mask)
+    shadow_canvas = shadow_canvas.filter(ImageFilter.GaussianBlur(blur))
+    shadow_canvas.paste(card, (14, 14), card)
+    return shadow_canvas
+
+
+def wrap_text(draw, text: str, font, max_width: int):
+    words = text.split()
+    if not words:
+        return []
+
+    lines = []
+    current = words[0]
+
+    for word in words[1:]:
+        trial = current + " " + word
+        bbox = draw.textbbox((0, 0), trial, font=font)
+        width = bbox[2] - bbox[0]
+
+        if width <= max_width:
+            current = trial
+        else:
+            lines.append(current)
+            current = word
+
+    lines.append(current)
+    return lines
+
+
+def draw_wrapped_text(draw, x: int, y: int, text: str, font, fill, max_width: int, line_gap: int = 2, max_lines: int = 2):
+    lines = wrap_text(draw, text, font, max_width)[:max_lines]
+    cur_y = y
+
+    for line in lines:
+        draw.text((x, cur_y), line, font=font, fill=fill)
+        bbox = draw.textbbox((0, 0), line, font=font)
+        cur_y += (bbox[3] - bbox[1]) + line_gap
+
+
+def upload_signature(files) -> str:
+    parts = []
+    for f in files:
+        content = f.getvalue()
+        digest = hashlib.md5(content).hexdigest()
+        parts.append(f"{f.name}:{len(content)}:{digest}")
+    joined = "|".join(parts)
+    return hashlib.md5(joined.encode()).hexdigest()
+
+
+def tile_ratio(shape_format: str) -> float:
+    if shape_format == "Landscape":
+        return 0.72
+    if shape_format == "Portrait":
+        return 1.18
+    if shape_format == "Square":
+        return 1.0
+    if shape_format == "Tall Portrait":
+        return 1.35
+    return 0.92
+
+
+# --------------------------------------------------
+# AI classification
+# --------------------------------------------------
+def classify_image_with_openai(raw_bytes: bytes, model_name: str) -> Dict:
+    client = get_openai_client()
+    if client is None:
+        return {
+            "category": "General",
+            "subcategory": "General",
+            "display_name": "Image Highlight",
+            "confidence": 0,
+        }
+
+    image_data_uri = image_to_data_uri(raw_bytes, "image/png")
+
+    instruction = (
+        "Analyze this image for a professional presentation collage. "
+        "Return STRICT JSON only in this format: "
+        '{"category":"short category","subcategory":"short subcategory","display_name":"short specific presentation label","confidence":0}. '
+        "The display_name must be specific, concise, and presentation-friendly, such as "
+        "'3D Printer Setup', 'Lab Equipment Unit', 'Testing Station', 'Technical Device', 'Research Instrument', or 'Machine Interface'. "
+        "Avoid generic labels like 'Image Highlight' or 'Visual Highlight'. "
+        "Choose category from: People, Event, Classroom, Laboratory, Technology, Building, Nature, Workshop, Research, Industrial Visit, Wellness, Culture, Other."
+    )
+
+    try:
+        response = client.responses.create(
+            model=model_name,
+            input=[
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{base_img}"
-                            }
-                        }
-                    ]
+                        {"type": "input_text", "text": instruction},
+                        {"type": "input_image", "image_url": image_data_uri, "detail": "low"},
+                    ],
                 }
             ],
-            response_format={"type": "json_object"}
         )
 
-        content = response.choices[0].message.content
-        parsed = json.loads(content)
+        output_text = getattr(response, "output_text", "") or ""
+        parsed = parse_json_from_text(output_text)
 
-        label = parsed.get("name", "Unknown Asset").strip()
-        if not label:
-            label = "Unknown Asset"
-
-        return {"name": label}
-
+        return {
+            "category": parsed.get("category", "General"),
+            "subcategory": parsed.get("subcategory", "General"),
+            "display_name": parsed.get("display_name", parsed.get("subcategory", "Image Highlight")),
+            "confidence": int(parsed.get("confidence", 0) or 0),
+        }
     except Exception:
-        return {"name": "Unknown Asset"}
+        return {
+            "category": "General",
+            "subcategory": "General",
+            "display_name": "Image Highlight",
+            "confidence": 0,
+        }
 
 
-# --- 3. Rendering Engine ---
-def render_collage(items, mode, cols, gap, margin, radius, b_weight, b_color, bg_color, font_size, sizing_option):
-    if not items:
-        return None
+# --------------------------------------------------
+# State helpers
+# --------------------------------------------------
+def ensure_state():
+    if "images_meta" not in st.session_state:
+        st.session_state["images_meta"] = []
+    if "images_bytes" not in st.session_state:
+        st.session_state["images_bytes"] = {}
+    if "generated_collage" not in st.session_state:
+        st.session_state["generated_collage"] = None
+    if "upload_sig" not in st.session_state:
+        st.session_state["upload_sig"] = None
+    if "dashboard_layout" not in st.session_state:
+        st.session_state["dashboard_layout"] = []
 
-    pil_images = []
-    valid_items = []
 
-    for m in items:
-        img_bytes = st.session_state["images_bytes"].get(m["id"])
-        if img_bytes:
-            pil_images.append(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
-            valid_items.append(m)
+def get_meta_items() -> List[ImageItem]:
+    return [ImageItem(**d) for d in st.session_state["images_meta"]]
 
-    if not pil_images:
-        return None
 
-    widths, heights = zip(*(i.size for i in pil_images))
+def set_meta_items(items: List[ImageItem]):
+    st.session_state["images_meta"] = [asdict(x) for x in items]
 
-    if sizing_option == "Enlarge to Largest":
-        ref_w, ref_h = max(widths), max(heights)
-    elif sizing_option == "Increase to Tallest":
-        ref_h = max(heights)
-        avg_aspect = sum(w / h for w, h in zip(widths, heights)) / len(valid_items)
-        ref_w = int(ref_h * avg_aspect)
-    elif sizing_option == "Shrink to Smallest":
-        ref_w, ref_h = min(widths), min(heights)
-    elif sizing_option == "Match Width":
-        ref_w = max(widths)
-        ref_h = ref_w
-    elif sizing_option == "Match Height":
-        ref_h = max(heights)
-        ref_w = ref_h
-    else:
-        ref_w, ref_h = widths[0], heights[0]
 
-    canvas_w = 2000
-    count = len(valid_items)
-    cols = count if mode == "Horizontal" else (1 if mode == "Vertical" else cols)
-    rows = math.ceil(count / cols)
+def push_meta_to_widget_state():
+    for item in get_meta_items():
+        st.session_state[f"display_name_{item.id}"] = item.display_name
+        st.session_state[f"category_{item.id}"] = item.category
+        st.session_state[f"order_{item.id}"] = int(item.display_order)
+        st.session_state[f"highlight_{item.id}"] = bool(item.highlight)
 
-    tile_w = (canvas_w - (2 * margin) - (cols - 1) * gap) // cols
-    tile_h = int(tile_w * (ref_h / ref_w))
-    canvas_h = (rows * tile_h) + ((rows - 1) * gap) + (2 * margin)
 
-    canvas = Image.new("RGBA", (canvas_w, int(canvas_h)), ImageColor.getrgb(bg_color) + (255,))
+def sync_edits_from_widgets():
+    updated = get_meta_items()
+    for item in updated:
+        item.display_name = st.session_state.get(f"display_name_{item.id}", item.display_name)
+        item.category = st.session_state.get(f"category_{item.id}", item.category)
+        item.display_order = int(st.session_state.get(f"order_{item.id}", item.display_order))
+        item.highlight = bool(st.session_state.get(f"highlight_{item.id}", item.highlight))
+    set_meta_items(updated)
+    return updated
 
-    font_path = "Roboto-Bold.ttf"
-    if not os.path.exists(font_path):
-        try:
-            r = requests.get(
-                "https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Bold.ttf",
-                timeout=10
-            )
-            with open(font_path, "wb") as f_f:
-                f_f.write(r.content)
-        except Exception:
-            pass
 
-    try:
-        font = ImageFont.truetype(font_path, font_size)
-    except Exception:
-        font = ImageFont.load_default()
-
-    for idx, (item, raw_img) in enumerate(zip(valid_items, pil_images)):
-        r, c = divmod(idx, cols)
-        x = margin + c * (tile_w + gap)
-        y = margin + r * (tile_h + gap)
-
-        img = ImageOps.fit(raw_img, (tile_w, tile_h), Image.LANCZOS)
-
-        mask = Image.new("L", (tile_w, tile_h), 0)
-        ImageDraw.Draw(mask).rounded_rectangle((0, 0, tile_w, tile_h), radius=radius, fill=255)
-
-        tile_cv = Image.new("RGBA", (tile_w, tile_h), (0, 0, 0, 0))
-        tile_cv.paste(img, (0, 0), mask)
-
-        draw = ImageDraw.Draw(tile_cv)
-        if b_weight > 0:
-            draw.rounded_rectangle(
-                (0, 0, tile_w, tile_h),
-                radius=radius,
-                outline=b_color,
-                width=b_weight
-            )
-
-        name_txt = item.get("display_name", "UNKNOWN ASSET").upper()
-
-        bbox = draw.textbbox((0, 0), name_txt, font=font)
-        text_w = bbox[2] - bbox[0]
-        text_h = bbox[3] - bbox[1]
-
-        pad_x = 30
-        pad_y = 15
-        box_w = text_w + (2 * pad_x)
-        box_h = text_h + (2 * pad_y)
-
-        px = (tile_w - box_w) // 2
-        py = tile_h - box_h - 40
-
-        draw.rounded_rectangle(
-            [px, py, px + box_w, py + box_h],
-            radius=12,
-            fill=(15, 23, 42, 220),
-            outline="white",
-            width=2
+def init_dashboard_layout(items: List[ImageItem]):
+    st.session_state["dashboard_layout"] = [
+        dashboard.Item(
+            item.id,
+            item.grid_x,
+            item.grid_y,
+            item.grid_w,
+            item.grid_h,
+            isDraggable=True,
+            isResizable=True,
         )
-        draw.text(
-            (tile_w // 2, py + box_h // 2),
-            name_txt,
-            fill="white",
-            font=font,
-            anchor="mm"
-        )
+        for item in items
+    ]
 
-        canvas.alpha_composite(tile_cv, (int(x), int(y)))
+
+def sync_dashboard_to_meta():
+    items = get_meta_items()
+    layout_map = {}
+
+    raw_layout = st.session_state.get("dashboard", None)
+    if raw_layout:
+        for entry in raw_layout:
+            layout_map[entry["i"]] = entry
+
+    for item in items:
+        if item.id in layout_map:
+            entry = layout_map[item.id]
+            item.grid_x = int(entry["x"])
+            item.grid_y = int(entry["y"])
+            item.grid_w = int(entry["w"])
+            item.grid_h = int(entry["h"])
+
+    set_meta_items(items)
+    return items
+
+
+# --------------------------------------------------
+# Collage drawing
+# --------------------------------------------------
+def draw_card(canvas: Image.Image, img: Image.Image, item: ImageItem, box, radius: int, show_category_tag: bool, shape_style: str):
+    x1, y1, x2, y2 = box
+    w = x2 - x1
+    h = y2 - y1
+
+    tile = fit_to_tile(img, (w, h), radius, shape_style)
+    card = Image.new("RGBA", (w, h), (255, 255, 255, 0))
+    card.paste(tile, (0, 0), tile)
+
+    draw = ImageDraw.Draw(card)
+
+    overlay_h = 54 if show_category_tag else 42
+    overlay_y = h - overlay_h - 8
+
+    draw.rounded_rectangle(
+        (10, overlay_y, w - 10, h - 10),
+        radius=14,
+        fill=(255, 255, 255, 235),
+    )
+
+    text_x = 22
+    cur_y = overlay_y + 8
+
+    if show_category_tag:
+        tag_font = load_font(11, bold=False)
+        cat = item.category.strip() if item.category else "General"
+        draw.text((text_x, cur_y), cat, font=tag_font, fill=(110, 110, 110))
+        cur_y += 14
+
+    title_font = load_font(15, bold=True)
+    title = item.display_name.strip() if item.display_name else "Image Highlight"
+    draw_wrapped_text(draw, text_x, cur_y, title[:70], title_font, (28, 28, 28), w - 40)
+
+    shadowed = add_shadow(card, radius=radius, shape_style=shape_style)
+    canvas.alpha_composite(shadowed, (x1 - 14, y1 - 14))
+
+
+def build_grouped_collage(
+    items: List[ImageItem],
+    width: int,
+    bg_rgb: Tuple[int, int, int],
+    gap: int,
+    radius: int,
+    show_category_tag: bool,
+    images_per_row: int = 3,
+    show_group_headings: bool = False,
+    section_title_align: str = "Left",
+    highlight_scale: float = 1.12,
+    shape_style: str = "Rounded Rectangle",
+    shape_format: str = "Classic",
+):
+    groups = defaultdict(list)
+    for item in items:
+        key = item.category.strip() if item.category else "General"
+        groups[key].append(item)
+
+    for cat in groups:
+        groups[cat] = sorted(groups[cat], key=lambda x: (x.display_order, x.original_file_name))
+
+    top_margin = 28
+    side_margin = 44
+    section_gap = 26
+    heading_h = 26 if show_group_headings else 0
+
+    usable_w = width - 2 * side_margin
+    base_tile_w = (usable_w - (images_per_row - 1) * gap) // images_per_row
+    base_tile_h = int(base_tile_w * tile_ratio(shape_format))
+
+    est_h = top_margin + 10
+    for _, g in groups.items():
+        rows = math.ceil(len(g) / images_per_row)
+        est_h += heading_h + rows * base_tile_h + (rows - 1) * gap + section_gap
+
+    height = max(900, est_h)
+    canvas = Image.new("RGBA", (width, height), bg_rgb + (255,))
+    draw = ImageDraw.Draw(canvas)
+    y = top_margin
+    heading_font = load_font(max(18, width // 56), bold=True)
+
+    for category, group_items in groups.items():
+        if show_group_headings:
+            bbox = draw.textbbox((0, 0), category, font=heading_font)
+            heading_w = bbox[2] - bbox[0]
+            if section_title_align == "Center":
+                heading_x = (width - heading_w) // 2
+            else:
+                heading_x = side_margin
+            draw.text((heading_x, y), category, font=heading_font, fill=(42, 42, 42))
+            y += heading_h
+
+        idx = 0
+        rows = math.ceil(len(group_items) / images_per_row)
+
+        for r in range(rows):
+            row_items = group_items[idx: idx + images_per_row]
+            row_count = len(row_items)
+            row_width = row_count * base_tile_w + (row_count - 1) * gap
+            row_start_x = (width - row_width) // 2
+
+            for c, item in enumerate(row_items):
+                cur_w = base_tile_w
+                cur_h = base_tile_h
+
+                if item.highlight:
+                    cur_w = int(base_tile_w * highlight_scale)
+                    cur_h = int(base_tile_h * highlight_scale)
+
+                x1 = row_start_x + c * (base_tile_w + gap)
+                y1 = y + r * (base_tile_h + gap)
+                x2 = x1 + cur_w
+                y2 = y1 + cur_h
+
+                img = safe_open_image(st.session_state["images_bytes"][item.id])
+                draw_card(canvas, img, item, (x1, y1, x2, y2), radius, show_category_tag, shape_style)
+
+            idx += images_per_row
+
+        y += rows * (base_tile_h + gap) + section_gap
 
     return canvas.convert("RGB")
 
 
-# --- 4. Sidebar & Upload Handling ---
+def build_grid_collage(
+    items: List[ImageItem],
+    width: int,
+    height: int,
+    bg_rgb: Tuple[int, int, int],
+    gap: int,
+    radius: int,
+    show_category_tag: bool,
+    shape_style: str,
+    shape_format: str,
+):
+    canvas = Image.new("RGBA", (width, height), bg_rgb + (255,))
+    margin_x = 44
+    margin_y = 28
+
+    cols = math.ceil(math.sqrt(len(items)))
+    rows = math.ceil(len(items) / cols)
+
+    usable_w = width - 2 * margin_x - (cols - 1) * gap
+    tile_w = max(160, usable_w // cols)
+    tile_h = max(170, int(tile_w * tile_ratio(shape_format)))
+
+    idx = 0
+    for r in range(rows):
+        remaining = len(items) - idx
+        row_count = min(cols, remaining)
+        row_width = row_count * tile_w + (row_count - 1) * gap
+        row_start_x = (width - row_width) // 2
+
+        for c in range(row_count):
+            item = items[idx]
+            x1 = row_start_x + c * (tile_w + gap)
+            y1 = margin_y + r * (tile_h + gap)
+            x2 = x1 + tile_w
+            y2 = y1 + tile_h
+            img = safe_open_image(st.session_state["images_bytes"][item.id])
+            draw_card(canvas, img, item, (x1, y1, x2, y2), radius, show_category_tag, shape_style)
+            idx += 1
+
+    return canvas.convert("RGB")
+
+
+def build_manual_grid_collage(
+    items: List[ImageItem],
+    width: int,
+    bg_rgb: Tuple[int, int, int],
+    radius: int,
+    show_category_tag: bool,
+    shape_style: str,
+):
+    cols = 12
+    gutter = 12
+    canvas_margin = 20
+    cell_px = (width - 2 * canvas_margin) / cols
+
+    max_bottom = 0
+    for item in items:
+        bottom = (item.grid_y + item.grid_h) * cell_px
+        if bottom > max_bottom:
+            max_bottom = bottom
+
+    height = max(900, int(max_bottom + 80))
+    canvas = Image.new("RGBA", (width, height), bg_rgb + (255,))
+
+    for item in items:
+        x1 = int(canvas_margin + item.grid_x * cell_px + gutter / 2)
+        y1 = int(canvas_margin + item.grid_y * cell_px + gutter / 2)
+        x2 = int(canvas_margin + (item.grid_x + item.grid_w) * cell_px - gutter / 2)
+        y2 = int(canvas_margin + (item.grid_y + item.grid_h) * cell_px - gutter / 2)
+
+        img = safe_open_image(st.session_state["images_bytes"][item.id])
+        draw_card(canvas, img, item, (x1, y1, x2, y2), radius, show_category_tag, shape_style)
+
+    return canvas.convert("RGB")
+
+
+# --------------------------------------------------
+# App
+# --------------------------------------------------
+ensure_state()
+
 with st.sidebar:
-    st.header("📤 Media Input")
-    uploaded_files = st.file_uploader(
-        "Upload Images",
-        accept_multiple_files=True,
-        type=["png", "jpg", "jpeg", "webp"]
-    )
+    st.header("Settings")
 
-    if uploaded_files:
-        new_meta = []
-        new_bytes = {}
+    base_layout_options = ["Grouped by AI Category", "Grid"]
+    if ELEMENTS_AVAILABLE:
+        base_layout_options.append("Flexible Grid")
 
-        for f in uploaded_files:
-            raw = f.getvalue()
-            file_hash = hashlib.md5(raw).hexdigest()[:10]
-            uid = f"img_{file_hash}"
+    layout_style = st.selectbox("Layout Style", base_layout_options, index=0)
+    aspect_ratio = st.selectbox("Canvas Ratio", ["16:9", "4:3", "1:1"], index=0)
+    canvas_width = st.slider("Canvas Width", 1200, 4000, 2200, 100)
+    gap = st.slider("Spacing", 8, 40, 14, 2)
+    radius = st.slider("Corner Radius", 0, 40, 16, 2)
+    bg_color = st.color_picker("Background Color", "#F4F4F6")
 
-            new_bytes[uid] = raw
-            new_meta.append(
-                asdict(
+    st.subheader("Tile Options")
+    shape_style = st.selectbox("Shape Style", ["Rounded Rectangle", "Rectangle", "Ellipse", "Circle"], index=0)
+    shape_format = st.selectbox("Shape Format", ["Classic", "Landscape", "Portrait", "Square", "Tall Portrait"], index=0)
+
+    st.subheader("Label Options")
+    show_category_tag = st.toggle("Show category on each card", value=False)
+    show_group_headings = st.toggle("Show category group headings", value=False)
+
+    st.subheader("Layout Controls")
+    section_title_align = st.selectbox("Group Heading Alignment", ["Left", "Center"], index=0)
+    images_per_row = st.slider("Images Per Row", 2, 5, 3)
+    highlight_scale = st.slider("Highlight Image Scale", 1.0, 1.5, 1.12, 0.05)
+
+    st.subheader("AI")
+    use_ai = st.toggle("Use OpenAI vision classification", True)
+    model_name = st.text_input("Model name", "gpt-5.2")
+
+uploaded_files = st.file_uploader(
+    "Upload multiple images",
+    type=["jpg", "jpeg", "png", "webp"],
+    accept_multiple_files=True,
+)
+
+if uploaded_files:
+    new_sig = upload_signature(uploaded_files)
+    if st.session_state["upload_sig"] != new_sig:
+        meta_items = []
+        image_bytes = {}
+
+        for idx, file in enumerate(uploaded_files):
+            try:
+                file_bytes = file.getvalue()
+                _ = safe_open_image(file_bytes)
+                uid = f"img_{idx}_{hashlib.md5(file_bytes).hexdigest()[:10]}"
+                image_bytes[uid] = file_bytes
+
+                row = idx // 4
+                col = idx % 4
+
+                meta_items.append(
                     ImageItem(
                         id=uid,
-                        original_file_name=f.name,
-                        display_name="Processing..."
+                        original_file_name=file.name,
+                        display_order=idx + 1,
+                        grid_x=col * 3,
+                        grid_y=row * 4,
+                        grid_w=3,
+                        grid_h=4,
                     )
                 )
-            )
+            except Exception as e:
+                st.warning(f"Could not read {file.name}: {e}")
 
-        old_ids = {m["id"] for m in st.session_state["images_meta"]}
-        new_ids = {m["id"] for m in new_meta}
+        st.session_state["images_bytes"] = image_bytes
+        set_meta_items(meta_items)
+        push_meta_to_widget_state()
+        init_dashboard_layout(meta_items)
+        st.session_state["generated_collage"] = None
+        st.session_state["upload_sig"] = new_sig
 
-        if old_ids != new_ids:
-            st.session_state["images_bytes"] = new_bytes
-            st.session_state["images_meta"] = new_meta
-            st.session_state["generated_collage"] = None
+items = get_meta_items()
 
-            keys_to_delete = [
-                k for k in list(st.session_state.keys())
-                if k.startswith("dn_") or k.startswith("inp_")
-            ]
-            for k in keys_to_delete:
-                del st.session_state[k]
+if st.button("Classify Images", use_container_width=True, type="primary") and items:
+    if use_ai:
+        progress = st.progress(0)
+        status = st.empty()
 
-            # Auto-run AI labeling immediately after upload
-            for m in st.session_state["images_meta"]:
-                res = classify_image(st.session_state["images_bytes"][m["id"]])
-                label = res.get("name", "Unknown Asset").strip()
+        for i, item in enumerate(items):
+            status.write(f"Analyzing {item.original_file_name}...")
+            result = classify_image_with_openai(st.session_state["images_bytes"][item.id], model_name)
+            item.category = result.get("category", "General")
+            item.subcategory = result.get("subcategory", "General")
+            item.display_name = result.get("display_name", "Image Highlight")
+            item.confidence = result.get("confidence", 0)
+            progress.progress((i + 1) / len(items))
 
-                if not label:
-                    label = "Unknown Asset"
+        set_meta_items(items)
+        push_meta_to_widget_state()
+        status.success("Classification completed.")
+    else:
+        for item in items:
+            item.category = "General"
+            item.display_name = "Image Highlight"
+        set_meta_items(items)
+        push_meta_to_widget_state()
 
-                st.session_state[f"dn_{m['id']}"] = label
-                m["display_name"] = label
+items = get_meta_items()
 
-            st.rerun()
+if items:
+    st.subheader("Images")
+    cols = st.columns(4)
+    for idx, item in enumerate(items):
+        with cols[idx % 4]:
+            st.image(safe_open_image(st.session_state["images_bytes"][item.id]), use_container_width=True)
+            st.markdown(f"**{st.session_state.get(f'display_name_{item.id}', item.display_name)}**")
+            st.caption(f"Category: {st.session_state.get(f'category_{item.id}', item.category)}")
 
+if items:
+    st.subheader("Edit Display Names and Grouping")
+    for item in items:
+        current_title = st.session_state.get(f"display_name_{item.id}", item.display_name)
+        with st.expander(f"Edit: {current_title}", expanded=False):
+            a, b = st.columns([1, 2])
 
-# --- 5. Main UI ---
-if st.session_state["images_meta"]:
-    st.markdown('<p class="main-header">🖼️ AI Image Studio</p>', unsafe_allow_html=True)
-    t1, t2 = st.tabs(["📝 AI & Labels", "🎨 Style & Layout"])
+            with a:
+                st.image(safe_open_image(st.session_state["images_bytes"][item.id]), use_container_width=True)
 
-    with t1:
-        if st.button("✨ RUN AI AUTO-LABEL", use_container_width=True, type="primary"):
-            with st.spinner("Analyzing..."):
-                for m in st.session_state["images_meta"]:
-                    res = classify_image(st.session_state["images_bytes"][m["id"]])
-                    label = res.get("name", "Unknown Asset").strip()
+            with b:
+                st.text_input("Display Name", key=f"display_name_{item.id}")
+                st.text_input("Category", key=f"category_{item.id}")
+                st.number_input("Display Order", min_value=1, step=1, key=f"order_{item.id}")
+                st.checkbox("Highlight", key=f"highlight_{item.id}")
 
-                    if not label:
-                        label = "Unknown Asset"
+items = sync_edits_from_widgets()
 
-                    st.session_state[f"dn_{m['id']}"] = label
-                    m["display_name"] = label
+if layout_style == "Flexible Grid":
+    if not ELEMENTS_AVAILABLE:
+        st.warning("Flexible Grid needs `streamlit-elements` installed.")
+    else:
+        st.subheader("Flexible Grid Editor")
+        st.caption("Drag and resize the cards below. Then click Generate Collage.")
 
-            st.rerun()
+        if "dashboard_layout" not in st.session_state or not st.session_state["dashboard_layout"]:
+            init_dashboard_layout(items)
 
-        for m in st.session_state["images_meta"]:
-            col_a, col_b = st.columns([1, 5])
-            col_a.image(st.session_state["images_bytes"][m["id"]], width=100)
+        with elements("flex_grid_editor"):
+            with dashboard.Grid(
+                st.session_state["dashboard_layout"],
+                cols=12,
+                rowHeight=70,
+                onLayoutChange=sync("dashboard"),
+                draggableHandle=".drag-handle",
+            ):
+                for item in items:
+                    img_b64 = base64.b64encode(st.session_state["images_bytes"][item.id]).decode()
+                    card_title = st.session_state.get(f"display_name_{item.id}", item.display_name)
 
-            current_label = st.session_state.get(f"dn_{m['id']}", "")
-            new_label = col_b.text_input(
-                "Label",
-                value=current_label if current_label else m["display_name"],
-                key=f"inp_{m['id']}"
-            )
+                    with mui.Paper(
+                        key=item.id,
+                        elevation=3,
+                        sx={
+                            "display": "flex",
+                            "flexDirection": "column",
+                            "height": "100%",
+                            "borderRadius": "18px",
+                            "overflow": "hidden",
+                            "backgroundColor": "#ffffff",
+                        },
+                    ):
+                        with mui.Box(
+                            className="drag-handle",
+                            sx={
+                                "padding": "8px 12px",
+                                "cursor": "move",
+                                "fontSize": "13px",
+                                "fontWeight": 600,
+                                "backgroundColor": "#f7f7fa",
+                                "borderBottom": "1px solid #ececf2",
+                                "lineHeight": 1.3,
+                            },
+                        ):
+                            mui.Typography(card_title)
 
-            st.session_state[f"dn_{m['id']}"] = new_label
-            m["display_name"] = new_label.strip() if new_label.strip() else "Unknown Asset"
+                        mui.Box(
+                            component="img",
+                            src=f"data:image/png;base64,{img_b64}",
+                            sx={
+                                "width": "100%",
+                                "height": "calc(100% - 44px)",
+                                "objectFit": "cover",
+                            },
+                        )
 
-    with t2:
-        st.subheader("📏 Image Sizing")
+if items and st.button("Generate Collage", type="primary", use_container_width=True):
+    items = sync_edits_from_widgets()
 
-        sizing_option = st.radio(
-            "Scaling Method:",
-            [
-                "Keep Original",
-                "Enlarge to Largest",
-                "Increase to Tallest",
-                "Shrink to Smallest",
-                "Match Width",
-                "Match Height"
-            ],
-            horizontal=True,
-            index=1
+    if layout_style == "Flexible Grid" and ELEMENTS_AVAILABLE:
+        items = sync_dashboard_to_meta()
+
+    ordered_items = sorted(items, key=lambda x: (x.category, x.display_order, x.original_file_name))
+    width = canvas_width
+    bg_rgb = hex_to_rgb(bg_color)
+
+    if aspect_ratio == "16:9":
+        height = int(width * 9 / 16)
+    elif aspect_ratio == "4:3":
+        height = int(width * 3 / 4)
+    else:
+        height = width
+
+    if layout_style == "Grouped by AI Category":
+        collage = build_grouped_collage(
+            items=ordered_items,
+            width=width,
+            bg_rgb=bg_rgb,
+            gap=gap,
+            radius=radius,
+            show_category_tag=show_category_tag,
+            images_per_row=images_per_row,
+            show_group_headings=show_group_headings,
+            section_title_align=section_title_align,
+            highlight_scale=highlight_scale,
+            shape_style=shape_style,
+            shape_format=shape_format,
+        )
+    elif layout_style == "Flexible Grid" and ELEMENTS_AVAILABLE:
+        collage = build_manual_grid_collage(
+            items=items,
+            width=width,
+            bg_rgb=bg_rgb,
+            radius=radius,
+            show_category_tag=show_category_tag,
+            shape_style=shape_style,
+        )
+    else:
+        collage = build_grid_collage(
+            items=ordered_items,
+            width=width,
+            height=height,
+            bg_rgb=bg_rgb,
+            gap=gap,
+            radius=radius,
+            show_category_tag=show_category_tag,
+            shape_style=shape_style,
+            shape_format=shape_format,
         )
 
-        st.divider()
+    st.session_state["generated_collage"] = collage
 
-        col1, col2 = st.columns(2)
-        mode = col1.selectbox("Layout Mode", ["Grid", "Horizontal", "Vertical"], index=0)
-        cols = col2.slider("Columns", 1, 6, 3)
+if st.session_state["generated_collage"] is not None:
+    st.subheader("Collage Preview")
+    st.image(st.session_state["generated_collage"], use_container_width=True)
 
-        col3, col4, col5 = st.columns(3)
-        gap = col3.slider("Inner Gap (Grid Spacing)", 0, 150, 40)
-        margin = col4.slider("Outer Margin", 0, 200, 60)
-        radius = col5.slider("Corner Rounding", 0, 100, 30)
+    png_data = pil_to_bytes(st.session_state["generated_collage"], "PNG")
+    jpg_data = pil_to_bytes(st.session_state["generated_collage"], "JPEG", quality=96)
+    pdf_data = pil_to_bytes(st.session_state["generated_collage"], "PDF")
 
-        col6, col7, col8 = st.columns(3)
-        b_weight = col6.slider("Border Thickness", 0, 20, 5)
-        b_color = col7.color_picker("Border Color", "#0000FF")
-        bg_color = col8.color_picker("Background Color", "#FFFFFF")
+    d1, d2, d3 = st.columns(3)
+    with d1:
+        st.download_button("Download PNG", data=png_data, file_name="ai_collage.png", mime="image/png", use_container_width=True)
+    with d2:
+        st.download_button("Download JPEG", data=jpg_data, file_name="ai_collage.jpg", mime="image/jpeg", use_container_width=True)
+    with d3:
+        st.download_button("Download PDF", data=pdf_data, file_name="ai_collage.pdf", mime="application/pdf", use_container_width=True)
 
-        font_size = st.slider("Label Font Size", 20, 120, 40)
-
-    if st.button("🚀 GENERATE FINAL COLLAGE", use_container_width=True, type="primary"):
-        st.session_state["generated_collage"] = render_collage(
-            st.session_state["images_meta"],
-            mode,
-            cols,
-            gap,
-            margin,
-            radius,
-            b_weight,
-            b_color,
-            bg_color,
-            font_size,
-            sizing_option
-        )
-
-    if st.session_state["generated_collage"]:
-        st.image(st.session_state["generated_collage"], use_container_width=True)
-
-        buf = io.BytesIO()
-        st.session_state["generated_collage"].save(buf, format="PNG")
-        st.download_button(
-            "📥 Download Collage",
-            buf.getvalue(),
-            file_name="collage.png"
-        )
-else:
-    st.info("Please upload images in the sidebar to start.")
+with st.expander("Notes"):
+    st.markdown(
+        "- Flexible Grid uses a drag-and-resize editor and saves tile positions into the image metadata.\n"
+        "- Edited names are preserved unless the uploaded file set changes.\n"
+        "- Add `streamlit-elements==0.1.0` to requirements for drag-and-place support.\n"
+    )
