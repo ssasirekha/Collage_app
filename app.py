@@ -14,6 +14,17 @@ from openai import OpenAI
 # --- 1. Setup & State ---
 st.set_page_config(page_title="AI Asset Studio Pro", page_icon="🖼️", layout="wide")
 
+st.markdown("""
+    <style>
+    .main-header { font-size: 2.2rem; font-weight: 800; color: #1e293b; margin-bottom: 1rem; }
+    div.stButton > button:first-child[kind="primary"] {
+        background-color: #ff4b4b;
+        border-color: #ff4b4b;
+        color: white;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
 @dataclass
 class ImageItem:
     id: str
@@ -24,45 +35,26 @@ if "images_meta" not in st.session_state: st.session_state["images_meta"] = []
 if "images_bytes" not in st.session_state: st.session_state["images_bytes"] = {}
 if "generated_collage" not in st.session_state: st.session_state["generated_collage"] = None
 
-# --- 2. MODIFIED: Image Type & Specific Naming Logic ---
+# --- 2. AI Logic ---
 def get_openai_client():
     api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-    if not api_key: return None
-    return OpenAI(api_key=api_key.strip())
+    return OpenAI(api_key=api_key.strip()) if api_key else None
 
 def classify_image(raw_bytes: bytes):
     client = get_openai_client()
     if not client: return None
     base_img = base64.b64encode(raw_bytes).decode("utf-8")
     try:
-        # Strict prompt to identify TYPE and specific NAME
         response = client.chat.completions.create(
             model="gpt-4o",
-            messages=[
-                {
-                    "role": "system", 
-                    "content": "You are a technical asset auditor. Your goal is to categorize the image type and provide a specific functional name."
-                },
-                {
-                    "role": "user", 
-                    "content": [
-                        {
-                            "type": "text", 
-                            "text": """Analyze this image. 
-                            1. Identify Image Type: (e.g., Software UI, Mechanical Part, Architectural Site).
-                            2. Provide a Specific Name: Based on visual evidence (text on screen, component shape).
-                            Return ONLY a JSON object: {"name": "Specific Functional Name"} 
-                            Example: 'SCADA Fleet Dashboard' or 'Vertical Centrifugal Pump'."""
-                        },
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base_img}", "detail": "high"}}
-                    ]
-                }
-            ],
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": "Identify this industrial asset. Provide a 2-3 word professional name. Return JSON: {'name':'Short Name'}"},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base_img}"}}
+            ]}],
             response_format={"type": "json_object"}
         )
         return json.loads(response.choices[0].message.content)
-    except Exception:
-        return {"name": "ANALYSIS ERROR"}
+    except: return None
 
 # --- 3. Rendering Engine ---
 def render_collage(items, mode, cols, gap, margin, radius, b_weight, b_color, bg_color, font_size, sizing_option):
@@ -71,13 +63,22 @@ def render_collage(items, mode, cols, gap, margin, radius, b_weight, b_color, bg
     pil_images = [Image.open(io.BytesIO(st.session_state["images_bytes"][m['id']])).convert("RGB") for m in items]
     widths, heights = zip(*(i.size for i in pil_images))
     
-    # Defaults: Enlarge to Largest
-    if sizing_option == "Enlarge to Largest": ref_w, ref_h = max(widths), max(heights)
+    # Logic for Image Sizing including the new "Increase to Tallest"
+    if sizing_option == "Enlarge to Largest": 
+        ref_w, ref_h = max(widths), max(heights)
     elif sizing_option == "Increase to Tallest":
         ref_h = max(heights)
+        # Calculate width based on average aspect ratio to keep grid balanced
         avg_aspect = sum(w/h for w, h in zip(widths, heights)) / len(items)
         ref_w = int(ref_h * avg_aspect)
-    else: ref_w, ref_h = widths[0], heights[0]
+    elif sizing_option == "Shrink to Smallest": 
+        ref_w, ref_h = min(widths), min(heights)
+    elif sizing_option == "Match Width": 
+        ref_w = max(widths); ref_h = ref_w 
+    elif sizing_option == "Match Height": 
+        ref_h = max(heights); ref_w = ref_h
+    else: 
+        ref_w, ref_h = widths[0], heights[0]
 
     canvas_w = 2000
     count = len(items)
@@ -90,6 +91,7 @@ def render_collage(items, mode, cols, gap, margin, radius, b_weight, b_color, bg
     
     canvas = Image.new("RGBA", (canvas_w, int(canvas_h)), ImageColor.getrgb(bg_color) + (255,))
     
+    # Cloud Font Support
     font_path = "Roboto-Bold.ttf"
     if not os.path.exists(font_path):
         try:
@@ -115,7 +117,7 @@ def render_collage(items, mode, cols, gap, margin, radius, b_weight, b_color, bg
         if b_weight > 0:
             draw.rounded_rectangle((0,0,tile_w,tile_h), radius=radius, outline=b_color, width=b_weight)
         
-        # Labeling
+        # Text Labeling
         name_txt = st.session_state.get(f"dn_{item['id']}", item['display_name']).upper()
         bbox = draw.textbbox((0,0), name_txt, font=font)
         tw, th = bbox[2]-bbox[0]+60, bbox[3]-bbox[1]+30
@@ -143,12 +145,12 @@ with st.sidebar:
             st.session_state["images_bytes"], st.session_state["images_meta"] = new_bytes, new_meta
 
 if st.session_state["images_meta"]:
-    st.title("🖼️ Smart Asset Labeller")
-    t1, t2 = st.tabs(["📝 Image Analysis", "🎨 Layout & Style"])
+    st.markdown('<p class="main-header">🖼️ AI Image Studio</p>', unsafe_allow_html=True)
+    t1, t2 = st.tabs(["📝 AI & Labels", "🎨 Style & Layout"])
     
     with t1:
-        if st.button("✨ RUN SMART ANALYSIS", use_container_width=True, type="primary"):
-            with st.spinner("Determining image types and names..."):
+        if st.button("✨ RUN AI AUTO-LABEL", use_container_width=True, type="primary"):
+            with st.spinner("Analyzing..."):
                 for m in st.session_state["images_meta"]:
                     res = classify_image(st.session_state["images_bytes"][m['id']])
                     if res: st.session_state[f"dn_{m['id']}"] = res['name']
@@ -157,26 +159,36 @@ if st.session_state["images_meta"]:
         for m in st.session_state["images_meta"]:
             col_a, col_b = st.columns([1, 5])
             col_a.image(st.session_state["images_bytes"][m['id']], width=100)
-            st.session_state[f"dn_{m['id']}"] = col_b.text_input(f"Resulting Label", value=st.session_state.get(f"dn_{m['id']}", "ANALYZING..."), key=f"inp_{m['id']}")
+            st.session_state[f"dn_{m['id']}"] = col_b.text_input(f"Label", value=st.session_state.get(f"dn_{m['id']}", "ASSET"), key=f"inp_{m['id']}")
 
     with t2:
-        st.subheader("📏 Grid Configuration")
-        sizing_option = st.radio("Sizing:", ["Keep Original", "Enlarge to Largest", "Increase to Tallest"], index=1)
+        st.subheader("📏 Image Sizing")
+        # Added "Increase to Tallest" to the sizing radio options
+        sizing_option = st.radio("Scaling Method:", ["Keep Original", "Enlarge to Largest", "Increase to Tallest", "Shrink to Smallest", "Match Width", "Match Height"], horizontal=True, index=1) 
         
-        col1, col2, col3 = st.columns(3)
-        mode = col1.selectbox("Layout", ["Grid", "Horizontal", "Vertical"])
+        st.divider()
+        col1, col2 = st.columns(2)
+        mode = col1.selectbox("Layout Mode", ["Grid", "Horizontal", "Vertical"], index=0)
         cols = col2.slider("Columns", 1, 6, 3)
-        gap = col3.slider("Inner Spacing", 0, 100, 40)
         
-        col4, col5, col6 = st.columns(3)
-        b_weight = col4.slider("Border", 0, 20, 5)
-        b_color = col5.color_picker("Border Color", "#0000FF") # Default: Blue
-        bg_color = col6.color_picker("Background", "#FFFFFF") # Default: White
+        col3, col4, col5 = st.columns(3)
+        gap = col3.slider("Inner Gap (Grid Spacing)", 0, 150, 40)
+        margin = col4.slider("Outer Margin", 0, 200, 60)
+        radius = col5.slider("Corner Rounding", 0, 100, 30)
+        
+        col6, col7, col8 = st.columns(3)
+        b_weight = col6.slider("Border Thickness", 0, 20, 5)
+        b_color = col7.color_picker("Border Color", "#0000FF") # Default: Blue
+        bg_color = col8.color_picker("Background Color", "#FFFFFF") # Default: White
+        
+        font_size = st.slider("Label Font Size", 20, 120, 40)
 
-    if st.button("🚀 GENERATE COLLAGE", use_container_width=True, type="primary"):
-        st.session_state["generated_collage"] = render_collage(st.session_state["images_meta"], mode, cols, gap, 60, 30, b_weight, b_color, bg_color, 40, sizing_option)
+    if st.button("🚀 GENERATE FINAL COLLAGE", use_container_width=True, type="primary"):
+        st.session_state["generated_collage"] = render_collage(st.session_state["images_meta"], mode, cols, gap, margin, radius, b_weight, b_color, bg_color, font_size, sizing_option)
 
     if st.session_state["generated_collage"]:
         st.image(st.session_state["generated_collage"], use_container_width=True)
         buf = io.BytesIO(); st.session_state["generated_collage"].save(buf, format="PNG")
-        st.download_button("📥 Save Image", buf.getvalue(), file_name="asset_grid.png")
+        st.download_button("📥 Download Collage", buf.getvalue(), file_name="collage.png")
+else:
+    st.info("Please upload images in the sidebar to start.")
