@@ -34,6 +34,7 @@ st.markdown("""
         background: #f8fafc;
         border: 1px solid #e2e8f0;
         text-align: center;
+        margin-bottom: 10px;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -153,7 +154,6 @@ def get_ordered_items():
         if item_id in items_map:
             ordered.append(items_map[item_id])
 
-    # add any missing ids
     known = set(st.session_state["image_order"])
     for m in st.session_state["images_meta"]:
         if m["id"] not in known:
@@ -396,22 +396,28 @@ if st.session_state["images_meta"]:
         st.subheader("↕ Flexible Grid Arrangement")
         st.caption("Drag the image cards to reorder them. The collage will be created in this exact order.")
 
-        sortable_items = []
-        for m in get_ordered_items():
-            label = m.get("display_name", "Unknown Asset")
-            sortable_items.append({
-                "id": m["id"],
-                "name": label
-            })
+        ordered_items = get_ordered_items()
 
-        new_order = sort_items(
-            sortable_items,
+        sortable_labels = []
+        label_to_id = {}
+
+        for idx, m in enumerate(ordered_items):
+            label = m.get("display_name", "Unknown Asset").strip()
+            if not label:
+                label = "Unknown Asset"
+
+            unique_label = f"{idx+1}. {label}"
+            sortable_labels.append(unique_label)
+            label_to_id[unique_label] = m["id"]
+
+        new_order_labels = sort_items(
+            sortable_labels,
             direction="horizontal",
             multi_containers=False
         )
 
-        if new_order:
-            st.session_state["image_order"] = [item["id"] for item in new_order]
+        if new_order_labels:
+            st.session_state["image_order"] = [label_to_id[label] for label in new_order_labels]
 
         ordered_items = get_ordered_items()
 
