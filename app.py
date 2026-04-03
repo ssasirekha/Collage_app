@@ -19,10 +19,12 @@ st.markdown("""
     .stTabs [data-baseweb="tab-list"] { gap: 24px; }
     .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; background-color: #f1f5f9; border-radius: 4px 4px 0 0; padding: 10px 20px; }
     .stTabs [aria-selected="true"] { background-color: #e2e8f0; font-weight: bold; }
-    /* Highlighting the AI button specifically */
-    div.stButton > button:first-child[kind="secondary"] {
-        border: 2px solid #ff4b4b;
-        color: #ff4b4b;
+    
+    /* Highlight the Primary Action Button (AI Auto-Label) */
+    div.stButton > button:first-child[kind="primary"] {
+        background-color: #ff4b4b;
+        border-color: #ff4b4b;
+        color: white;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -51,7 +53,7 @@ def classify_image(raw_bytes: bytes):
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": [
-                {"type": "text", "text": "Identify the subject of this image. Return JSON: {'category':'uppercase_type','name':'Title Case Name'}"},
+                {"type": "text", "text": "Identify the subject. Return JSON: {'category':'uppercase','name':'Title Case Name'}"},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base_img}"}}
             ]}],
             response_format={"type": "json_object"}
@@ -59,39 +61,68 @@ def classify_image(raw_bytes: bytes):
         return json.loads(response.choices[0].message.content)
     except: return None
 
-def sync_data():
-    for m in st.session_state["images_meta"]:
-        m['display_name'] = st.session_state.get(f"dn_{m['id']}", m['display_name'])
-        m['category'] = st.session_state.get(f"cat_{m['id']}", m['category'])
-
-# --- 3. Rendering Engine ---
-def render_collage(items, mode, cols, gap, margin, radius, b_weight, b_color, bg_color, font_size):
+# --- 3. Rendering Engine with Smart Auto-Scaling ---
+def render_collage(items, mode, cols, gap, margin, radius, b_weight, b_color, bg_color, font_size, sizing_option):
     if not items: return None
-    sync_data()
     
+    pil_images = []
+    for item in items:
+        img = Image.open(io.BytesIO(st.session_state["images_bytes"][item['id']])).convert("RGB")
+        pil_images.append(img)
+
+    # 1. Image Sizing Selection Logic
+    widths, heights = zip(*(i.size for i in pil_images))
+    
+    if sizing_option == "Enlarge to Largest":
+        ref_w, ref_h = max(widths), max(heights)
+    elif sizing_option == "Shrink to Smallest":
+        ref_w, ref_h = min(widths), min(heights)
+    elif sizing_option == "Match Width":
+        ref_w = max(widths)
+        ref_h = ref_w 
+    elif sizing_option == "Match Height":
+        ref_h = max(heights)
+        ref_w = ref_h
+    else: # Keep Original (uses first image as reference for the grid cell)
+        ref_w, ref_h = widths[0], heights[0]
+
+    # 2. Grid Calculations
     canvas_w = 2000
     count = len(items)
-    
     if mode == "Horizontal": cols, rows = count, 1
     elif mode == "Vertical": cols, rows = 1, count
     else: rows = math.ceil(count / cols)
 
+    # Calculate fixed tile size to fit the 2000px width
     tile_w = (canvas_w - (2 * margin) - (cols - 1) * gap) // cols
-    tile_h = tile_w
-    canvas_h = (rows * tile_h) + ((rows - 1) * gap) + (2 * margin)
+    # Maintain aspect ratio of the reference size within the tile
+    aspect = ref_h / ref_w
+    tile_h = int(tile_w * aspect)
     
+    canvas_h = (rows * tile_h) + ((rows - 1) * gap) + (2 * margin)
     canvas = Image.new("RGBA", (canvas_w, int(canvas_h)), ImageColor.getrgb(bg_color) + (255,))
     
-    for idx, item in enumerate(items):
+    # 3. Font Loading
+    font = None
+    for f_path in ["DejaVuSans-Bold.ttf", "ArialBold.ttf", "LiberationSans-Bold.ttf"]:
+        try:
+            font = ImageFont.truetype(f_path, font_size)
+            break
+        except: continue
+    if not font: font = ImageFont.load_default()
+
+    # 4. Composite
+    for idx, (item, raw_img) in enumerate(zip(items, pil_images)):
         r, c = divmod(idx, cols)
         rem = count - (r * cols)
         row_cols = min(rem, cols)
         row_w = (row_cols * tile_w) + ((row_cols - 1) * gap)
+        
         x = ((canvas_w - row_w) // 2) + c * (tile_w + gap)
         y = margin + r * (tile_h + gap)
 
-        raw = Image.open(io.BytesIO(st.session_state["images_bytes"][item['id']])).convert("RGB")
-        img = ImageOps.fit(raw, (tile_w, tile_h), Image.LANCZOS)
+        # AUTO-SCALE: This fits the image perfectly into the tile dimensions
+        img = ImageOps.fit(raw_img, (tile_w, tile_h), Image.LANCZOS)
         
         mask = Image.new("L", (tile_w, tile_h), 0)
         ImageDraw.Draw(mask).rounded_rectangle((0,0,tile_w,tile_h), radius=radius, fill=255)
@@ -103,34 +134,31 @@ def render_collage(items, mode, cols, gap, margin, radius, b_weight, b_color, bg
         if b_weight > 0:
             draw.rounded_rectangle((0,0,tile_w,tile_h), radius=radius, outline=b_color, width=b_weight)
         
-        try: font = ImageFont.truetype("arialbd.ttf", font_size)
-        except: font = ImageFont.load_default()
-        
-        name_txt = item['display_name'].upper()
+        # Dynamic Label
+        name_txt = st.session_state.get(f"dn_{item['id']}", item['display_name']).upper()
         bbox = draw.textbbox((0,0), name_txt, font=font)
-        tw, th = bbox[2] - bbox[0] + 30, bbox[3] - bbox[1] + 20
-        px, py = (tile_w - tw)//2, tile_h - th - 20
+        tw, th = bbox[2] - bbox[0] + 40, bbox[3] - bbox[1] + 25
+        px, py = (tile_w - tw)//2, tile_h - th - 30
         
-        draw.rounded_rectangle([px, py, px+tw, py+th], radius=8, fill=(15, 23, 42, 225), outline="white", width=1)
-        draw.text((px + 15, py + 8), name_txt, fill="white", font=font)
+        draw.rounded_rectangle([px, py, px+tw, py+th], radius=10, fill=(15, 23, 42, 230), outline="white", width=2)
+        draw.text((px + 20, py + 10), name_txt, fill="white", font=font)
 
         canvas.alpha_composite(tile_cv, (int(x), int(y)))
     
     return canvas.convert("RGB")
 
-# --- 4. Sidebar & UI ---
+# --- 4. Sidebar & Main UI ---
 with st.sidebar:
     st.header("📤 Media Input")
-    # Updated label to "Upload Images"
     uploaded_files = st.file_uploader("Upload Images", accept_multiple_files=True)
     
     if uploaded_files:
         if len(uploaded_files) != len(st.session_state["images_meta"]):
             new_meta, new_bytes = [], {}
-            for i, uploaded_file in enumerate(uploaded_files):
+            for i, f in enumerate(uploaded_files):
                 uid = f"img_{i}"
-                new_bytes[uid] = uploaded_file.getvalue()
-                new_meta.append(asdict(ImageItem(id=uid, original_file_name=uploaded_file.name)))
+                new_bytes[uid] = f.getvalue()
+                new_meta.append(asdict(ImageItem(id=uid, original_file_name=f.name)))
             st.session_state["images_bytes"], st.session_state["images_meta"] = new_bytes, new_meta
 
 if st.session_state["images_meta"]:
@@ -139,50 +167,53 @@ if st.session_state["images_meta"]:
     t1, t2 = st.tabs(["📝 Content & AI", "🎨 Layout & Style"])
     
     with t1:
-        # Highlighted AI Button using 'type="secondary"' + custom CSS above, or 'type="primary"' for standard highlight
         if st.button("✨ Run AI Auto-Label", use_container_width=True, type="primary"):
-            with st.spinner("AI is identifying your images..."):
+            with st.spinner("AI Identifying..."):
                 for m in st.session_state["images_meta"]:
                     res = classify_image(st.session_state["images_bytes"][m['id']])
-                    if res:
-                        m['display_name'], m['category'] = res['name'], res['category']
-                        st.session_state[f"dn_{m['id']}"] = res['name']
+                    if res: st.session_state[f"dn_{m['id']}"] = res['name']
             st.rerun()
             
         for m in st.session_state["images_meta"]:
             c_i, c_e = st.columns([1, 5])
             c_i.image(st.session_state["images_bytes"][m['id']], width=100)
-            c_e.text_input(f"Label for {m['original_file_name']}", value=m['display_name'], key=f"dn_{m['id']}")
-            st.divider()
+            st.session_state[f"dn_{m['id']}"] = c_e.text_input(f"Label", value=st.session_state.get(f"dn_{m['id']}", "IMAGE"), key=f"inp_{m['id']}")
 
     with t2:
+        st.subheader("📏 Image Sizing (Auto-Scale)")
+        sizing_option = st.radio(
+            "Normalize image dimensions:",
+            ["Keep Original", "Enlarge to Largest", "Shrink to Smallest", "Match Width", "Match Height"],
+            horizontal=True,
+            index=1 # Default to Enlarge for best grid fit
+        )
+        
+        st.divider()
         col1, col2 = st.columns(2)
         mode = col1.selectbox("Layout Mode", ["Grid", "Horizontal", "Vertical"])
         cols = col2.slider("Columns", 1, 6, 3) if mode == "Grid" else 1
         
-        st.subheader("Spacing & Borders")
         col3, col4, col5 = st.columns(3)
         gap = col3.slider("Inner Gap", 0, 150, 40)
         margin = col4.slider("Outer Margin", 0, 200, 60)
         radius = col5.slider("Corner Rounding", 0, 100, 30)
         
         col6, col7, col8 = st.columns(3)
-        b_weight = col6.slider("Border Thickness", 0, 20, 5)
+        b_weight = col6.slider("Border", 0, 20, 5)
         b_color = col7.color_picker("Border Color", "#FFFFFF")
-        bg_color = col8.color_picker("Canvas Background", "#0F172A")
+        bg_color = col8.color_picker("Background", "#0F172A")
         
-        st.subheader("Typography")
-        font_size = st.select_slider("Label Font Size", options=[12, 16, 20, 24, 30, 36, 42, 48, 64, 80], value=30)
+        font_size = st.select_slider("Label Font Size", options=[16, 24, 32, 40, 48, 64, 80], value=40)
 
     if st.button("🚀 GENERATE FINAL IMAGE", use_container_width=True, type="primary"):
         st.session_state["generated_collage"] = render_collage(
-            st.session_state["images_meta"], mode, cols, gap, margin, radius, b_weight, b_color, bg_color, font_size
+            st.session_state["images_meta"], mode, cols, gap, margin, radius, b_weight, b_color, bg_color, font_size, sizing_option
         )
 
     if st.session_state["generated_collage"]:
         st.image(st.session_state["generated_collage"], use_container_width=True)
         buf = io.BytesIO()
         st.session_state["generated_collage"].save(buf, format="PNG")
-        st.download_button("📥 Download Result", buf.getvalue(), file_name="ai_studio_output.png", mime="image/png")
+        st.download_button("📥 Download", buf.getvalue(), file_name="output.png")
 else:
-    st.info("Upload images in the sidebar to start.")
+    st.info("Upload images to start.")
