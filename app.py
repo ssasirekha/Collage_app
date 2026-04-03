@@ -11,220 +11,176 @@ from PIL import Image, ImageOps, ImageDraw, ImageFont, ImageFilter, ImageColor
 from openai import OpenAI
 
 # --- 1. Setup & State ---
-st.set_page_config(page_title="AI Industrial Studio Pro", page_icon="🏭", layout="wide")
+st.set_page_config(page_title="AI Asset Studio Pro", page_icon="🏭", layout="wide")
 
-# Custom CSS for a cleaner UI
 st.markdown("""
     <style>
-    .stApp { background-color: #f8f9fa; }
-    .main-header { font-size: 2.5rem; font-weight: 800; color: #1e293b; margin-bottom: 0.5rem; }
-    .status-box { padding: 1rem; border-radius: 0.5rem; background-color: #ffffff; border: 1px solid #e2e8f0; margin-bottom: 1rem; }
+    .main-header { font-size: 2.2rem; font-weight: 800; color: #1e293b; margin-bottom: 1rem; }
+    .stTabs [data-baseweb="tab-list"] { gap: 24px; }
+    .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; background-color: #f1f5f9; border-radius: 4px 4px 0 0; padding: 10px 20px; }
+    .stTabs [aria-selected="true"] { background-color: #e2e8f0; font-weight: bold; }
     </style>
     """, unsafe_allow_html=True)
-
-st.markdown('<p class="main-header">🏭 Industrial Asset Designer</p>', unsafe_allow_html=True)
 
 @dataclass
 class ImageItem:
     id: str
     original_file_name: str
-    category: str = "HARDWARE"
-    display_name: str = "EQUIPMENT"
+    category: str = "INDUSTRIAL"
+    display_name: str = "ASSET"
 
-def ensure_state():
-    if "images_meta" not in st.session_state:
-        st.session_state["images_meta"] = []
-    if "images_bytes" not in st.session_state:
-        st.session_state["images_bytes"] = {}
-    if "generated_collage" not in st.session_state:
-        st.session_state["generated_collage"] = None
+if "images_meta" not in st.session_state: st.session_state["images_meta"] = []
+if "images_bytes" not in st.session_state: st.session_state["images_bytes"] = {}
+if "generated_collage" not in st.session_state: st.session_state["generated_collage"] = None
 
-ensure_state()
-
-# --- 2. AI & Sync Logic ---
-
+# --- 2. Logic ---
 def get_openai_client():
     api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
     return OpenAI(api_key=api_key.strip()) if api_key else None
 
-def classify_image_with_openai(raw_bytes: bytes):
+def classify_image(raw_bytes: bytes):
     client = get_openai_client()
     if not client: return None
     base_img = base64.b64encode(raw_bytes).decode("utf-8")
-    
-    prompt = """
-    Identify this industrial tool. 
-    Return JSON: {"category": "SHORT_CATEGORY", "display_name": "Product Name"}
-    Keep display_name < 18 chars. Use Uppercase for category.
-    """
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base_img}", "detail": "high"}}
+                {"type": "text", "text": "Identify this industrial machine. Return JSON: {'category':'uppercase_type','name':'Title Case Name'}"},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base_img}"}}
             ]}],
             response_format={"type": "json_object"}
         )
         return json.loads(response.choices[0].message.content)
-    except Exception: return None
+    except: return None
 
-def sync_edits():
-    for item in st.session_state["images_meta"]:
-        iid = item['id']
-        if f"dn_{iid}" in st.session_state:
-            item['display_name'] = st.session_state[f"dn_{iid}"].upper()
-        if f"cat_{iid}" in st.session_state:
-            item['category'] = st.session_state[f"cat_{iid}"].upper()
+def sync_data():
+    for m in st.session_state["images_meta"]:
+        m['display_name'] = st.session_state.get(f"dn_{m['id']}", m['display_name'])
+        m['category'] = st.session_state.get(f"cat_{m['id']}", m['category'])
 
-# --- 3. High-Definition Rendering Engine ---
-
-def get_shape_mask(size: Tuple[int, int], shape: str, radius: int) -> Image.Image:
-    mask = Image.new("L", size, 0)
-    draw = ImageDraw.Draw(mask)
-    if shape == "Circle": draw.ellipse((0, 0, size[0], size[1]), fill=255)
-    elif shape == "Hexagon":
-        w, h = size
-        draw.polygon([(w/2,0), (w,h*0.25), (w,h*0.75), (w/2,h), (0,h*0.75), (0,h*0.25)], fill=255)
-    else: draw.rounded_rectangle((0, 0, size[0], size[1]), radius=radius, fill=255)
-    return mask
-
-def create_pro_tile(img_bytes: bytes, size: Tuple[int, int], shape: str, radius: int, name: str, category: str, border_color: str) -> Image.Image:
-    img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-    fitted = ImageOps.fit(img, size, method=Image.Resampling.LANCZOS)
-    
-    # 1. Image with internal 2px white stroke
-    mask = get_shape_mask(size, shape, radius)
-    content = Image.new("RGBA", size, (0, 0, 0, 0))
-    content.paste(fitted.convert("RGBA"), (0, 0), mask)
-    draw_internal = ImageDraw.Draw(content)
-    draw_internal.rounded_rectangle((0, 0, size[0], size[1]), radius=radius, outline="white", width=2)
-    
-    # 2. Main Border Frame
-    b_width = 6
-    canvas_s = (size[0] + b_width*2, size[1] + b_width*2)
-    bordered = Image.new("RGBA", canvas_s, (0,0,0,0))
-    b_mask = get_shape_mask(canvas_s, shape, radius + b_width)
-    
-    # Draw the main frame
-    frame_draw = ImageDraw.Draw(bordered)
-    frame_draw.rounded_rectangle((0, 0, canvas_s[0], canvas_s[1]), radius=radius+b_width, fill=border_color)
-    bordered.paste(content, (b_width, b_width), content)
-    
-    # 3. High-Contrast Label Pill
-    draw = ImageDraw.Draw(bordered)
-    try: 
-        font_main = ImageFont.truetype("arialbd.ttf", max(16, size[0] // 16))
-        font_sub = ImageFont.truetype("arial.ttf", max(11, size[0] // 26))
-    except: 
-        font_main = font_sub = ImageFont.load_default()
-    
-    txt_n, txt_c = name.upper(), category.upper()
-    bn, bc = draw.textbbox((0, 0), txt_n, font=font_main), draw.textbbox((0, 0), txt_c, font=font_sub)
-    tw = max(bn[2]-bn[0], bc[2]-bc[0]) + 30
-    th = (bn[3]-bn[1]) + (bc[3]-bc[1]) + 15
-
-    bx, by = (bordered.width - tw) // 2, bordered.height - th - 35
-    # Dark Glass Pill with White Outline
-    draw.rounded_rectangle([bx, by, bx + tw, by + th], radius=8, fill=(15, 23, 42, 230), outline="white", width=1)
-    
-    draw.text((bx + (tw - (bc[2]-bc[0]))//2, by + 5), txt_c, fill="#94a3b8", font=font_sub)
-    draw.text((bx + (tw - (bn[2]-bn[0]))//2, by + 18), txt_n, fill="white", font=font_main)
-    
-    # 4. Drop Shadow
-    shadow_cv = Image.new("RGBA", (canvas_s[0] + 40, canvas_s[1] + 40), (0,0,0,0))
-    shadow_cv.paste((0,0,0,70), (12, 14), b_mask)
-    shadow_cv = shadow_cv.filter(ImageFilter.GaussianBlur(15))
-    shadow_cv.paste(bordered, (10, 10), bordered)
-    return shadow_cv
-
-def build_dense_grid(items, width, bg_col, gap, radius, shape, cols, b_color):
+# --- 3. Rendering Engine ---
+def render_collage(items, mode, cols, gap, margin, radius, b_weight, b_color, bg_color, font_size):
     if not items: return None
-    sync_edits()
-    rows = math.ceil(len(items) / cols)
-    margin = 60
-    tile_w = (width - (2 * margin) - (cols - 1) * gap) // cols
+    sync_data()
+    
+    canvas_w = 2000
+    count = len(items)
+    
+    if mode == "Horizontal": cols, rows = count, 1
+    elif mode == "Vertical": cols, rows = 1, count
+    else: rows = math.ceil(count / cols)
+
+    tile_w = (canvas_w - (2 * margin) - (cols - 1) * gap) // cols
     tile_h = tile_w
-    height = (rows * tile_h) + ((rows - 1) * gap) + (2 * margin)
-    canvas = Image.new("RGBA", (width, int(height)), ImageColor.getrgb(bg_col) + (255,))
+    canvas_h = (rows * tile_h) + ((rows - 1) * gap) + (2 * margin)
+    
+    canvas = Image.new("RGBA", (canvas_w, int(canvas_h)), ImageColor.getrgb(bg_color) + (255,))
     
     for idx, item in enumerate(items):
         r, c = divmod(idx, cols)
-        rem = len(items) - (r * cols)
-        row_w = (min(rem, cols) * tile_w) + ((min(rem, cols) - 1) * gap)
-        x_pos = ((width - row_w) // 2) + c * (tile_w + gap)
-        y_pos = margin + r * (tile_h + gap)
+        rem = count - (r * cols)
+        row_cols = min(rem, cols)
+        row_w = (row_cols * tile_w) + ((row_cols - 1) * gap)
+        x = ((canvas_w - row_w) // 2) + c * (tile_w + gap)
+        y = margin + r * (tile_h + gap)
+
+        raw = Image.open(io.BytesIO(st.session_state["images_bytes"][item['id']])).convert("RGB")
+        img = ImageOps.fit(raw, (tile_w, tile_h), Image.LANCZOS)
         
-        card = create_pro_tile(st.session_state["images_bytes"][item['id']], (tile_w, tile_h), shape, radius, item['display_name'], item['category'], b_color)
-        canvas.alpha_composite(card, (int(x_pos) - 10, int(y_pos) - 10))
+        mask = Image.new("L", (tile_w, tile_h), 0)
+        ImageDraw.Draw(mask).rounded_rectangle((0,0,tile_w,tile_h), radius=radius, fill=255)
+        
+        tile_cv = Image.new("RGBA", (tile_w, tile_h), (0,0,0,0))
+        tile_cv.paste(img, (0,0), mask)
+        
+        # Dual Border
+        draw = ImageDraw.Draw(tile_cv)
+        if b_weight > 0:
+            draw.rounded_rectangle((0,0,tile_w,tile_h), radius=radius, outline=b_color, width=b_weight)
+        
+        # High-Contrast Labels
+        try: font = ImageFont.truetype("arialbd.ttf", font_size)
+        except: font = ImageFont.load_default()
+        
+        name_txt, cat_txt = item['display_name'].upper(), item['category'].upper()
+        
+        # Label Pill
+        tw = draw.textbbox((0,0), name_txt, font=font)[2] + 20
+        th = font_size + 15
+        px, py = (tile_w - tw)//2, tile_h - th - 20
+        
+        draw.rounded_rectangle([px, py, px+tw, py+th], radius=5, fill=(15, 23, 42, 220), outline="white", width=1)
+        draw.text((px + 10, py + 5), name_txt, fill="white", font=font)
+
+        canvas.alpha_composite(tile_cv, (int(x), int(y)))
+    
     return canvas.convert("RGB")
 
-# --- 4. Streamlit UI Layout ---
-
+# --- 4. Sidebar & UI ---
 with st.sidebar:
-    st.header("📤 Media Upload")
-    uploaded = st.file_uploader("Drop technical images here", type=["jpg", "png", "webp"], accept_multiple_files=True)
-    if uploaded:
-        if len(uploaded) != len(st.session_state["images_meta"]):
-            new_meta, new_bytes = [], {}
-            for idx, f in enumerate(uploaded):
-                uid = f"img_{idx}"
-                new_bytes[uid] = f.getvalue()
-                new_meta.append(asdict(ImageItem(id=uid, original_file_name=f.name)))
-            st.session_state["images_bytes"], st.session_state["images_meta"] = new_bytes, new_meta
+    st.header("📤 Input Assets")
+    uploaded_files = st.file_uploader("Upload Hardware Images", accept_multiple_files=True)
+    
+    # FIXED: Proper initialization of meta to avoid NameError 'f'
+    if uploaded_files:
+        if len(uploaded_files) != len(st.session_state["images_meta"]):
+            new_meta = []
+            new_bytes = {}
+            for i, uploaded_file in enumerate(uploaded_files):
+                uid = f"img_{i}"
+                new_bytes[uid] = uploaded_file.getvalue()
+                new_meta.append(asdict(ImageItem(id=uid, original_file_name=uploaded_file.name)))
+            st.session_state["images_bytes"] = new_bytes
+            st.session_state["images_meta"] = new_meta
 
 if st.session_state["images_meta"]:
-    tab1, tab2 = st.tabs(["📝 Data & Labeling", "🎨 Canvas Styling"])
+    st.markdown('<p class="main-header">🏭 Industrial Asset Combiner</p>', unsafe_allow_html=True)
     
-    with tab1:
-        c1, c2 = st.columns([1, 1])
-        with c1:
-            if st.button("✨ Auto-Label with AI", use_container_width=True):
-                with st.status("Analyzing...") as s:
-                    for m in st.session_state["images_meta"]:
-                        res = classify_image_with_openai(st.session_state["images_bytes"][m['id']])
-                        if res:
-                            m['category'], m['display_name'] = res['category'], res['display_name']
-                            st.session_state[f"dn_{m['id']}"], st.session_state[f"cat_{m['id']}"] = res['display_name'], res['category']
-                    s.update(label="Analysis Done!", state="complete")
-                st.rerun()
+    t1, t2 = st.tabs(["📝 Labeling & AI", "🎨 Layout & Styling"])
+    
+    with t1:
+        if st.button("✨ Run AI Auto-Label", use_container_width=True):
+            with st.spinner("Analyzing machines..."):
+                for m in st.session_state["images_meta"]:
+                    res = classify_image(st.session_state["images_bytes"][m['id']])
+                    if res:
+                        m['display_name'], m['category'] = res['name'], res['category']
+                        st.session_state[f"dn_{m['id']}"] = res['name']
+            st.rerun()
+            
+        for m in st.session_state["images_meta"]:
+            c_i, c_e = st.columns([1, 5])
+            c_i.image(st.session_state["images_bytes"][m['id']], width=100)
+            c_e.text_input(f"Label Name ({m['id']})", value=m['display_name'], key=f"dn_{m['id']}")
+            st.divider()
+
+    with t2:
+        col1, col2 = st.columns(2)
+        mode = col1.selectbox("Combine Mode", ["Grid", "Horizontal", "Vertical"])
+        cols = col2.slider("Grid Columns", 1, 6, 3) if mode == "Grid" else 1
         
-        with c2:
-            current_order = [m['id'] for m in st.session_state["images_meta"]]
-            new_order = st.multiselect("Drag/Remove to reorder grid sequence", options=current_order, default=current_order)
-            if len(new_order) == len(current_order):
-                st.session_state["images_meta"] = [next(m for m in st.session_state["images_meta"] if m['id'] == iid) for iid in new_order]
-
-        with st.expander("Edit Labels Manually", expanded=False):
-            for m in st.session_state["images_meta"]:
-                col_i, col_cat, col_nm = st.columns([1, 2, 2])
-                col_i.image(st.session_state["images_bytes"][m['id']], width=80)
-                st.text_input(f"Category", value=m['category'], key=f"cat_{m['id']}", on_change=sync_edits)
-                st.text_input(f"Display Name", value=m['display_name'], key=f"dn_{m['id']}", on_change=sync_edits)
-                st.divider()
-
-    with tab2:
-        col_a, col_b, col_c = st.columns(3)
-        cols = col_a.select_slider("Columns", options=[1, 2, 3, 4, 5], value=3)
-        gap = col_b.slider("Tile Spacing", 20, 150, 60)
-        radius = col_c.slider("Rounding", 0, 100, 45)
+        col3, col4, col5 = st.columns(3)
+        gap = col3.slider("Spacing", 0, 150, 40)
+        margin = col4.slider("Outer Margin", 0, 200, 60)
+        radius = col5.slider("Rounding", 0, 100, 30)
         
-        col_d, col_e, col_f = st.columns(3)
-        shape = col_d.selectbox("Tile Shape", ["Rounded Rect", "Circle", "Hexagon"])
-        bg_col = col_e.color_picker("Background", "#F1F5F9")
-        b_color = col_f.color_picker("Tile Border", "#FFFFFF")
+        col6, col7, col8 = st.columns(3)
+        b_weight = col6.slider("Border", 0, 20, 5)
+        b_color = col7.color_picker("Border Color", "#FFFFFF")
+        bg_color = col8.color_picker("Background", "#0F172A")
+        
+        font_size = st.slider("Label Size", 10, 60, 24)
 
-    st.divider()
-    if st.button("🚀 GENERATE HIGH-RES COLLAGE", use_container_width=True, type="primary"):
-        st.session_state["generated_collage"] = build_dense_grid(
-            st.session_state["images_meta"], 2400, bg_col, gap, radius, shape, cols, b_color
+    if st.button("🚀 GENERATE COLLAGE", use_container_width=True, type="primary"):
+        st.session_state["generated_collage"] = render_collage(
+            st.session_state["images_meta"], mode, cols, gap, margin, radius, b_weight, b_color, bg_color, font_size
         )
 
     if st.session_state["generated_collage"]:
-        st.subheader("🖼️ Final Output")
         st.image(st.session_state["generated_collage"], use_container_width=True)
         buf = io.BytesIO()
         st.session_state["generated_collage"].save(buf, format="PNG")
-        st.download_button("📥 Download 2400px Grid", buf.getvalue(), file_name="technical_grid_pro.png", mime="image/png")
+        st.download_button("📥 Download Asset Grid", buf.getvalue(), file_name="asset_collage.png", mime="image/png")
 else:
-    st.info("Please upload images in the sidebar to begin.")
+    st.info("Upload industrial images in the sidebar to start.")
